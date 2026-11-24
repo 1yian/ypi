@@ -703,6 +703,20 @@ class YpiEditor extends CustomEditor {
   }
 }
 
+const ROUTINE_TIER_ENTRY_PREFIXES = [
+  "tier: auto ",
+  "tier: quota ",
+  "tier: model override ",
+] as const;
+
+function isRoutineTierEntry(text: string): boolean {
+  return ROUTINE_TIER_ENTRY_PREFIXES.some((prefix) => text.startsWith(prefix));
+}
+
+interface TierEntryData {
+  readonly text?: string;
+}
+
 export default function ypiTui(pi: ExtensionAPI): void {
   let speed: { start: number; chars: number; lastRender: number } | undefined;
   let lastRate: number | undefined;
@@ -827,6 +841,16 @@ export default function ypiTui(pi: ExtensionAPI): void {
 
   pi.events.on(CALM_EVENT, applyCalmEvent);
   pi.events.on(LEGACY_CALM_EVENT, applyCalmEvent);
+
+  pi.registerEntryRenderer<TierEntryData>("pi-tiers", (entry, options, theme) => {
+    const text = entry.data?.text?.trim() ?? "";
+    if (text.length === 0) return undefined;
+    if (!options.expanded) {
+      if (isRoutineTierEntry(text)) return undefined;
+      if (isHidingTools()) return undefined;
+    }
+    return new Text(theme.fg("dim", text), 1, 0);
+  });
 
   const rememberToolRow = (context: { state: unknown; invalidate?: () => void }): void => {
     if (isRecord(context.state) && typeof context.invalidate === "function") {

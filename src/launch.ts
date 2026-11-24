@@ -161,15 +161,15 @@ function collectExtensionArgs(
 ): string[] {
   if (hasAnySourceMatch(configuredSources, ["1yian/ypi", "/ypi"])) return [];
   const args: string[] = [];
+  for (const rel of CORE_EXTENSIONS) {
+    const abs = resolve(packageRoot, rel);
+    if (existsSync(abs)) args.push("-e", abs);
+  }
   for (const pkg of BUNDLED_PACKAGES) {
     if (ignoreGlobalSettings || !hasAnySourceMatch(configuredSources, pkg.packageHints)) {
       const abs = resolve(packageRoot, pkg.relativePath);
       if (existsSync(abs)) args.push("-e", abs);
     }
-  }
-  for (const rel of CORE_EXTENSIONS) {
-    const abs = resolve(packageRoot, rel);
-    if (existsSync(abs)) args.push("-e", abs);
   }
   return args;
 }

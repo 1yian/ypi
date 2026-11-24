@@ -724,11 +724,66 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
     await runner.emit({ type: "agent_settled", aborted: true });
     assert.equal(sentMessages.length, 2, "'.' sends hidden continue once aborted turn settles");
 
+    const tierRenderer = runner.getEntryRenderer("pi-tiers");
+    assert.ok(tierRenderer !== undefined, "ypi must register a pi-tiers entry renderer");
+    const entryOptsCollapsed = {
+      expanded: false,
+      keyText: () => "",
+      keyHint: () => "",
+    };
+    const entryOptsExpanded = {
+      expanded: true,
+      keyText: () => "",
+      keyHint: () => "",
+    };
+    const routineEntry = {
+      type: "custom" as const,
+      id: "e-1",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      customType: "pi-tiers",
+      data: { text: "tier: auto → default (0.55)" },
+    };
+    const failoverEntry = {
+      type: "custom" as const,
+      id: "e-2",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      customType: "pi-tiers",
+      data: { text: "tier: anthropic could not be reached; this run continues on openai-codex" },
+    };
+    assert.equal(
+      tierRenderer(routineEntry, entryOptsCollapsed, theme),
+      undefined,
+      "routine tier routing lines stay hidden when collapsed",
+    );
+    assert.equal(
+      tierRenderer(failoverEntry, entryOptsCollapsed, theme),
+      undefined,
+      "failover notices stay hidden in calm mode when collapsed",
+    );
+    const expandedTier = tierRenderer(routineEntry, entryOptsExpanded, theme);
+    assert.ok(expandedTier !== undefined, "expanded mode reveals tier routing entry");
+    assert.ok(
+      stripTerminalSequences(expandedTier.render(80)[0] ?? "").startsWith(" tier: auto"),
+      "expanded tier entry renders with 1-column left padding",
+    );
+
     await calmCommand.handler("off", runner.createCommandContext());
     assert.deepEqual(captured.notifications, [], "/calm off also stays quiet");
     assert.equal(captured.hiddenThinkingLabel, undefined);
     const restoredToolLines = toolRow.render(80).map((line) => stripTerminalSequences(line));
     assert.ok(restoredToolLines.length > 0, "tool row must reappear when calm mode turns off");
+    assert.equal(
+      tierRenderer(routineEntry, entryOptsCollapsed, theme),
+      undefined,
+      "routine tier lines stay hidden even outside calm mode",
+    );
+    const visibleFailover = tierRenderer(failoverEntry, entryOptsCollapsed, theme);
+    assert.ok(
+      visibleFailover !== undefined,
+      "failover notice appears outside calm mode when collapsed",
+    );
 
     await runner.emit({ type: "session_shutdown", reason: "quit" });
   } finally {
@@ -981,6 +1036,11 @@ void test("buildPiLaunchPlan wires bundled extensions, avoids duplicates, and re
     assert.ok(clean.args.some((arg) => arg.endsWith("pi-tiers/src/index.ts")));
     assert.ok(clean.args.some((arg) => arg.endsWith("src/tui.ts")));
     assert.ok(clean.args.some((arg) => arg.endsWith("src/calm.ts")));
+    assert.ok(
+      clean.args.findIndex((arg) => arg.endsWith("src/tui.ts")) <
+        clean.args.findIndex((arg) => arg.endsWith("pi-tiers/src/index.ts")),
+      "core ypi extensions must load before bundled pi-tiers so ypi entry renderers take precedence",
+    );
     assert.deepEqual(clean.args.slice(-2), ["-p", "hello"]);
 
     writeFileSync(
