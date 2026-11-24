@@ -164,6 +164,7 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
     saveReports();
   };
   const stop = async () => {
+    pi.events.emit('ypi:optchat-active', { active: false });
     remote?.close(); remote = undefined; joined?.close(); joined = undefined;
     inspectorController?.abort(); unmountNavigation?.(); unmountNavigation = undefined;
     stopping = true; importController?.abort(); await importTask?.catch(() => {});
@@ -224,6 +225,7 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
       if (capabilities.connectedWindows !== false) atomicWrite(pending, JSON.stringify(reports));
       rememberProfile(name);
       active = { name, dir, config, memory, inbox, children, usage, unlock }; fault = undefined; idle = () => ctx.isIdle();
+      pi.events.emit('ypi:optchat-active', { active: true });
       if (ctx.mode === 'tui') unmountNavigation = mountNavigation(ctx, children, memory, shortcut, page => { void inspect(ctx, page); });
       // A one-shot run (`pi -p`, JSON) exits after its own prompt, which would end every conversation connected to it.
       if (capabilities.connectedWindows !== false && ctx.mode !== 'print' && ctx.mode !== 'json') closeWindows = await serveWindows(dir, children, () => !stopping && !importing && !pendingImport(dir), deliverReport);
@@ -498,8 +500,45 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
   });
   pi.on('before_provider_request', (event, ctx) => anthropicRequest(ctx.model, event.payload) ? cachePayload(event.payload) : event.payload);
   pi.on('cache_warming_decision', () => ({ action: 'stop' }));
-  pi.on('session_before_compact', (_event, ctx) => {
-    ctx.ui.notify('OptChat manages history between turns. Pi compaction is disabled; an exceptionally long single run may require stopping and continuing in a new turn.', 'info');
+  const foldNow = async (ctx: ExtensionContext, signal?: AbortSignal): Promise<void> => {
+    if (!active) return;
+    const a = required();
+    const began = Date.now();
+    const foldedTokens = Math.round((chars(run) + capped) / 4);
+    try {
+      flush();
+      const label = foldedTokens >= 1000 ? `${Math.round(foldedTokens / 1000)}k` : `${foldedTokens}`;
+      ctx.ui.setWorkingMessage(`OptChat: folding ${label} tokens into memory…`);
+      await a.memory.settle(signal);
+      run = [];
+      capped = 0;
+      logged = 0;
+      keep = 0;
+      view = undefined;
+      settledAt = Date.now();
+      status(ctx);
+      const elapsed = ((Date.now() - began) / 1000).toFixed(1);
+      const modelLabel = `${a.config.compactor.provider}/${a.config.compactor.model}`;
+      if (foldedTokens > 0) {
+        ctx.ui.notify(`OptChat folded ~${label} tokens into memory (${elapsed}s via ${modelLabel}).`, 'info');
+      } else {
+        ctx.ui.notify(`OptChat memory is up to date (${elapsed}s via ${modelLabel}).`, 'info');
+      }
+    } catch (error) {
+      ctx.ui.notify(`OptChat fold failed: ${errorText(error)}`, 'error');
+    } finally {
+      ctx.ui.setWorkingMessage();
+    }
+  };
+  pi.events.on('ypi:optchat-fold', (data: unknown) => {
+    if (!active || !record(data)) return;
+    const ctx = data.ctx as ExtensionContext | undefined;
+    if (!ctx) return;
+    void foldNow(ctx);
+  });
+  pi.on('session_before_compact', async (event, ctx) => {
+    if (!active) return;
+    await foldNow(ctx, event.signal);
     return { cancel: true };
   });
   const collectUsage = (ctx: ExtensionContext) => {
@@ -672,6 +711,13 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
     if (!remote) { ctx.ui.notify('/tell-main is for connected subagent windows.', 'info'); return; }
     try { await remote.tell(args); } catch (error) { ctx.ui.notify(errorText(error), 'error'); }
   } });
+  pi.registerCommand('fold', {
+    description: 'Immediately fold the active conversation window into OptChat memory',
+    handler: async (_args, ctx) => {
+      if (!active) { ctx.ui.notify('OptChat is not active in this session.', 'info'); return; }
+      await foldNow(ctx);
+    },
+  });
   pi.registerCommand('optchat', { description: 'OptChat profiles, settings, models, agents, instructions, memory browser, and imports',
     getArgumentCompletions: prefix => ['profile', 'settings', 'model', 'agents', 'agents model', 'usage', 'activity', 'instructions', 'browse', 'import'].filter(s => s.startsWith(prefix)).map(value => ({ value, label: value })),
     handler: async (args, ctx) => { try { await command(args, ctx); } catch (error) { ctx.ui.notify(errorText(error), 'error'); } },

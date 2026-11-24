@@ -530,6 +530,8 @@ function fitTelemetryStats(
 class YpiEditor extends CustomEditor {
   private readonly getTheme: () => Theme;
   private readonly getThinkingLevel: () => string;
+  private readonly kb: KeybindingsManager;
+  private readonly onCompactCommand: () => boolean;
 
   public constructor(
     tui: TUI,
@@ -537,10 +539,25 @@ class YpiEditor extends CustomEditor {
     keybindings: KeybindingsManager,
     getTheme: () => Theme,
     getThinkingLevel: () => string,
+    onCompactCommand: () => boolean,
   ) {
     super(tui, editorTheme, keybindings, { embedWorkingStatus: true });
     this.getTheme = getTheme;
     this.getThinkingLevel = getThinkingLevel;
+    this.kb = keybindings;
+    this.onCompactCommand = onCompactCommand;
+  }
+
+  public override handleInput(data: string): void {
+    if (this.kb.matches(data, "tui.input.submit") && !this.disableSubmit) {
+      const trimmed = this.getText().trim();
+      if ((trimmed === "/compact" || trimmed.startsWith("/compact ")) && this.onCompactCommand()) {
+        this.addToHistory(trimmed);
+        this.setText("");
+        return;
+      }
+    }
+    super.handleInput(data);
   }
 
   private static gutterForWidth(width: number): number {
@@ -653,6 +670,13 @@ export default function ypiTui(pi: ExtensionAPI): void {
   let requestRender: (() => void) | undefined;
   let invalidateStats: (() => void) | undefined;
   let stockExportRendering = false;
+  let optchatActive = false;
+
+  pi.events.on("ypi:optchat-active", (data: unknown) => {
+    if (isRecord(data) && typeof data["active"] === "boolean") {
+      optchatActive = data["active"];
+    }
+  });
 
   pi.events.on("pi-tiers:route", (data: unknown) => {
     tierRoute = parseTierRoute(data);
@@ -766,6 +790,11 @@ export default function ypiTui(pi: ExtensionAPI): void {
           keybindings,
           () => ctx.ui.theme,
           () => pi.getThinkingLevel(),
+          () => {
+            if (!optchatActive) return false;
+            pi.events.emit("ypi:optchat-fold", { ctx });
+            return true;
+          },
         ),
     );
   }

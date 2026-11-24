@@ -143,6 +143,7 @@ export function formatYpiHelp(): string {
     "  YPI_THEME           Initial theme override (default: ypi, or ypi-light/ypi)",
     "  YPI_ISOLATED=1      Same as --isolated",
     "  YPI_PI_BIN          Path to pi executable (default: pi)",
+    "  YPI_OPTCHAT=0       Disable OptChat memory (on by default)",
     "  YPI_OPTCHAT_CONFIG  Explicit path to optchat.json",
     "  YPI_CALM_FILE       Explicit path for persisted /calm state",
   ].join("\n");

@@ -54,15 +54,16 @@ For automatic terminal light/dark switching, set `"theme": "ypi-light/ypi"` (or 
 
 Copy `templates/tiers.example.json` to `~/.pi/agent/tiers.json` and edit the provider/model chains for whatever providers you authenticate with Pi (`anthropic`, `openai`, `openai-codex`, `google`, `openrouter`, etc.).
 
-## Configure OptChat (optional)
+## OptChat & `/compact` (enabled by default)
 
-OptChat stays inactive until enabled in an `optchat.json` file. `ypi` checks, in order:
+OptChat fold-mode memory is **on by default** in `ypi`:
 
-1. `YPI_OPTCHAT_CONFIG` environment variable
-2. `<cwd>/.pi/optchat.json`
-3. `<PI_CODING_AGENT_DIR>/optchat.json` (defaults to `~/.pi/agent/optchat.json`)
+- **Default compactor:** `tier/compact` (`thinking: "low"`), falling back cleanly to the session's active model if no `compact` tier is configured.
+- **Auto-fold:** keeps prompt caches warm across turns and auto-folds at **150k tokens** or when the prompt cache expires (`foldOnCacheExpiry: true`).
+- **Immediate `/compact`:** running `/compact` immediately flushes and settles the current conversation into OptChat's zoomable memory tree using the configured compactor and resets the active prompt window.
+- **Zero lock collisions:** each session automatically binds to its own session-scoped OptChat profile under `~/.pi/agent/ypi/optchat/profiles/` (persisted across `ypi -c` / `ypi -r`, cleaned up on exit for `--no-session`).
 
-Copy `templates/optchat.example.json` to `~/.pi/agent/optchat.json`:
+To pin a persistent named profile (for example, a long-lived assistant) or customize settings, create `<cwd>/.pi/optchat.json` or `~/.pi/agent/optchat.json` (or set `YPI_OPTCHAT_CONFIG`):
 
 ```json
 {
@@ -78,7 +79,7 @@ Copy `templates/optchat.example.json` to `~/.pi/agent/optchat.json`:
 }
 ```
 
-`compactorProvider` and `compactorModel` accept any provider and model registered in Pi (including `pi-tiers` virtual tiers like `tier` / `compact`). If omitted or unavailable, `ypi` falls back to the session's active model.
+Set `"enabled": false` or `YPI_OPTCHAT=0` to disable OptChat.
 
 ## Calm mode
 

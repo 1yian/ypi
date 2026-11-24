@@ -229,10 +229,25 @@ void test("calm harbor animation fits every terminal width cleanly and persists 
   }
 });
 
-void test("loadOptChatConfig resolves provider-agnostic compactor and fold settings cleanly", () => {
+void test("loadOptChatConfig defaults OptChat on with tier/compact at 150k fold tokens and supports overrides and opt-out", () => {
   const dir = join(tmpdir(), `ypi-e2e-${Date.now()}`);
-  mkdirSync(dir, { recursive: true });
+  const agentDir = join(dir, "agent");
+  mkdirSync(agentDir, { recursive: true });
   try {
+    const defaults = loadOptChatConfig(dir, undefined, { PI_CODING_AGENT_DIR: agentDir });
+    assert.ok(defaults !== undefined);
+    assert.equal(defaults.profile, undefined);
+    assert.equal(defaults.compactorProvider, "tier");
+    assert.equal(defaults.compactorModel, "compact");
+    assert.equal(defaults.thinking, "low");
+    assert.equal(defaults.foldTokens, 150_000);
+    assert.equal(defaults.foldOnCacheExpiry, true);
+
+    assert.equal(
+      loadOptChatConfig(dir, undefined, { PI_CODING_AGENT_DIR: agentDir, YPI_OPTCHAT: "0" }),
+      undefined,
+    );
+
     const configPath = join(dir, "optchat.json");
     writeFileSync(
       configPath,
@@ -249,7 +264,7 @@ void test("loadOptChatConfig resolves provider-agnostic compactor and fold setti
       }),
     );
 
-    const resolved = loadOptChatConfig(dir, configPath);
+    const resolved = loadOptChatConfig(dir, configPath, { PI_CODING_AGENT_DIR: agentDir });
     assert.ok(resolved !== undefined);
     assert.equal(resolved.profile, "assistant");
     assert.equal(resolved.compactorProvider, "tier");
@@ -258,7 +273,7 @@ void test("loadOptChatConfig resolves provider-agnostic compactor and fold setti
     assert.equal(resolved.foldOnCacheExpiry, true);
 
     writeFileSync(configPath, JSON.stringify({ enabled: false }));
-    assert.equal(loadOptChatConfig(dir, configPath), undefined);
+    assert.equal(loadOptChatConfig(dir, configPath, { PI_CODING_AGENT_DIR: agentDir }), undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

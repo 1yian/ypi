@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadOptChatConfig, type ResolvedOptChatConfig } from "./config.ts";
@@ -26,6 +26,26 @@ function callExport(mod: unknown, name: string, source: string, args: unknown[])
   const fn: unknown = Reflect.get(mod, name);
   if (typeof fn !== "function") throw new TypeError(`${source} does not export function ${name}`);
   return Reflect.apply(fn, undefined, args);
+}
+
+function sessionProfileName(sessionId: string): string {
+  const cleaned = sessionId.toLowerCase().replaceAll(/[^a-z0-9_-]/gu, "");
+  const suffix = cleaned.length > 0 ? cleaned.slice(0, 20) : Date.now().toString(36);
+  return `s-${suffix}`;
+}
+
+function findBoundProfile(ctx: ExtensionContext): string | undefined {
+  const entries = ctx.sessionManager.getEntries();
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i];
+    if (entry?.type === "custom" && entry.customType === "optchat.profile") {
+      const data: unknown = entry.data;
+      if (isRecord(data) && typeof data["name"] === "string" && data["name"].length > 0) {
+        return data["name"];
+      }
+    }
+  }
+  return undefined;
 }
 
 function ensureProfileDir(
@@ -60,17 +80,15 @@ function resolveCompactor(
       readonly thinking: ResolvedOptChatConfig["thinking"];
     }
   | undefined {
-  if (config.compactorProvider !== undefined && config.compactorModel !== undefined) {
-    const found = ctx.modelRegistry
-      .getAll()
-      .find((m) => m.provider === config.compactorProvider && m.id === config.compactorModel);
-    if (found !== undefined) {
-      return {
-        provider: found.provider,
-        model: found.id,
-        thinking: config.thinking,
-      };
-    }
+  const found = ctx.modelRegistry
+    .getAll()
+    .find((m) => m.provider === config.compactorProvider && m.id === config.compactorModel);
+  if (found !== undefined) {
+    return {
+      provider: found.provider,
+      model: found.id,
+      thinking: config.thinking,
+    };
   }
   if (ctx.model !== undefined) {
     return {
@@ -91,15 +109,22 @@ export default async function ypiOptChat(pi: ExtensionAPI): Promise<void> {
   const profilesUrl = new URL("../vendor/optchat/src/profiles.ts", import.meta.url).href;
   const optchatRaw: unknown = await import(optchatUrl);
   const profilesRaw: unknown = await import(profilesUrl);
-  const profileDir = ensureProfileDir(profilesRaw, profilesUrl, config.memoryHome, config.profile);
+
+  let ephemeralProfileDir: string | undefined;
 
   pi.on("session_start", (_event, ctx) => {
-    const entries = ctx.sessionManager.getEntries();
-    const hasBinding = entries.some(
-      (entry) => entry.type === "custom" && entry.customType === "optchat.profile",
-    );
-    if (!hasBinding) {
-      pi.appendEntry("optchat.profile", { name: config.profile });
+    const bound = findBoundProfile(ctx);
+    const profileName =
+      bound ?? config.profile ?? sessionProfileName(ctx.sessionManager.getSessionId());
+    const profileDir = ensureProfileDir(profilesRaw, profilesUrl, config.memoryHome, profileName);
+    const isEphemeral =
+      bound === undefined &&
+      config.profile === undefined &&
+      ctx.sessionManager.getSessionFile() === undefined;
+    ephemeralProfileDir = isEphemeral ? profileDir : undefined;
+
+    if (bound === undefined) {
+      pi.appendEntry("optchat.profile", { name: profileName });
     }
     const compactor = resolveCompactor(ctx, config);
     if (compactor === undefined) return;
@@ -129,4 +154,14 @@ export default async function ypiOptChat(pi: ExtensionAPI): Promise<void> {
       : {}),
   };
   await Promise.resolve(callExport(optchatRaw, "default", optchatUrl, [pi, capabilities]));
+
+  pi.on("session_shutdown", () => {
+    if (ephemeralProfileDir === undefined) return;
+    try {
+      rmSync(ephemeralProfileDir, { recursive: true, force: true });
+    } catch {
+      return;
+    }
+    ephemeralProfileDir = undefined;
+  });
 }
