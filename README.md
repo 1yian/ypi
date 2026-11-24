@@ -7,8 +7,8 @@ A user-agnostic, provider-agnostic [Pi](https://pi.dev) harness bundle packaging
 - **`@ff-labs/pi-fff`** - fast git-aware fuzzy file finder and grep.
 - **OptChat (`src/optchat.ts`)** - fold-mode session memory (`pi-optchat` 0.9.0 with fold-mode compaction and router-aware prompt cache marks) with a configurable compactor model or tier.
 - **`ypi` + `ypi-light` themes (`themes/`)** - obsidian-ink dark palette with electric mint, soft violet, sky blue, amber, and coral accents designed to look sharp both in `herdr` and default terminals, plus a matching light theme for automatic light/dark switching.
-- **Refined TUI (`src/tui.ts`)** - OpenCode / OMP-inspired left-rail composer, compact startup header, single-line collapsed tool rows (expandable with `ctrl+o` or click), pulsing working indicator, and responsive 2-row telemetry footer with `pi-tiers` route display, visual context bar, token totals, cache rate, cost, and live `tok/s`.
-- **Calm Mode (`src/calm.ts`)** - `/calm` toggle (`on` / `off` / `status`) that hides tool call noise and collapsed thinking labels while sailing a theme-aware moonlit harbor animation above the composer whenever the agent is working.
+- **Refined TUI (`src/tui.ts`)** - OpenCode / OMP-inspired uniform left-rail composer (`╭`/`│`/`╰`), compact startup header, single-line collapsed tool rows (expandable with `ctrl+o` or click), live Knight Rider luminous scanner with phase shimmer (`thinking`, `working`, `waiting for command`, `compacting`), and responsive 2-row telemetry footer with `pi-tiers` route display, visual context bar, token totals, cache rate, cost, and live `tok/s`.
+- **Calm Mode (`src/calm.ts`)** - `/calm` toggle (`on` / `off` / `status`) that hides all tool calls (including expanded rows) and collapsed thinking labels, and softens the composer rail and activity scanner into a serene zen presentation.
 
 No hardcoded user paths, no hardcoded providers, no orchestrator coupling. Bring your own providers, tiers, and model credentials.
 
@@ -83,10 +83,10 @@ Set `"enabled": false` or `YPI_OPTCHAT=0` to disable OptChat.
 
 ## Calm mode
 
-Run `/calm` inside Pi to toggle focus mode (persisted to `~/.pi/agent/ypi-calm`, overridable via `YPI_CALM_FILE`):
+Run `/calm` inside Pi to toggle zen focus mode (persisted to `~/.pi/agent/ypi-calm`, overridable via `YPI_CALM_FILE`):
 
-- Hides tool execution rows (while preserving tool images) and collapsed thinking labels; everything stays in LLM context and `/export`.
-- Replaces the default spinner row with a 3-row moonlit harbor sailboat animation tinted from your active Pi theme.
+- Hides all tool execution rows (including expanded views, while keeping everything in LLM context and `/export`) and hides collapsed thinking labels.
+- Shifts the composer rail and OpenCode-style top-rail luminous scanner to a slower, softer twilight breath with a right-aligned `☾ calm` indicator that never clips at any width.
 - Toggle back anytime with `/calm` (or `/calm off`) to immediately reveal every tool row in the transcript.
 
 ## Development
@@ -95,6 +95,8 @@ Run `/calm` inside Pi to toggle focus mode (persisted to `~/.pi/agent/ypi-calm`,
 bun install
 bun run check
 ```
+
+`bun run check` enforces `oxfmt`, `oxlint --type-aware --max-warnings 0`, `tsc --noEmit`, `knip --treat-config-hints-as-errors`, `depcruise src e2e`, and `node --test e2e/*.test.ts`.
 
 ## License
 

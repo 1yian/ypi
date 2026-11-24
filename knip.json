@@ -1,0 +1,6 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": ["src/optchat.ts", "src/tui.ts", "src/calm.ts", "e2e/**/*.test.ts"],
+  "project": ["src/**/*.ts", "e2e/**/*.ts"],
+  "ignoreDependencies": ["@ff-labs/pi-fff", "pi-tiers", "pi-web-access"]
+}

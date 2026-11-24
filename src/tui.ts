@@ -15,7 +15,19 @@ import {
   type EditorTheme,
   type TUI,
 } from "@earendil-works/pi-tui";
-import { isCalmActive, onCalmChange } from "./calm-state.ts";
+import {
+  createActivityTracker,
+  OPTCHAT_COMPACTING_EVENT,
+  parseCompactingEvent,
+  type ActivitySnapshot,
+} from "./activity.ts";
+import {
+  ACTIVITY_TICK_MS,
+  CALM_ACTIVITY_TICK_MS,
+  phaseRailToken,
+  renderActivityBorder,
+} from "./activity-renderer.ts";
+import { CALM_EVENT, LEGACY_CALM_EVENT, loadCalmPreference, parseCalmEvent } from "./calm-state.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
 type ForegroundToken = Parameters<Theme["fg"]>[0];
@@ -59,6 +71,16 @@ interface StatItem {
   readonly text: string;
   readonly priority: number;
   readonly short?: string;
+}
+
+interface YpiEditorCallbacks {
+  readonly getTheme: () => Theme;
+  readonly getThinkingLevel: () => string;
+  readonly isCalmActive: () => boolean;
+  readonly getActivitySnapshot: () => ActivitySnapshot;
+  readonly getAnimationTick: () => number;
+  readonly onCompactCommand: () => boolean;
+  readonly onExportCommand: () => void;
 }
 
 const FAST_MODE_KEY = "codex-fast-mode";
@@ -313,21 +335,6 @@ function summarizeToolMeta(state: ToolLineState): string | undefined {
   return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
-function installIndicator(ctx: ExtensionContext): void {
-  const theme = ctx.ui.theme;
-  ctx.ui.setWorkingIndicator({
-    frames: [
-      theme.fg("dim", "·"),
-      theme.fg("muted", "•"),
-      theme.fg("accent", "●"),
-      theme.fg("accent", "◉"),
-      theme.fg("muted", "●"),
-      theme.fg("dim", "•"),
-    ],
-    intervalMs: 110,
-  });
-}
-
 function installHeader(ctx: ExtensionContext): void {
   ctx.ui.setHeader((_tui, theme) => ({
     invalidate: () => undefined,
@@ -528,30 +535,30 @@ function fitTelemetryStats(
 }
 
 class YpiEditor extends CustomEditor {
-  private readonly getTheme: () => Theme;
-  private readonly getThinkingLevel: () => string;
+  private readonly callbacks: YpiEditorCallbacks;
   private readonly kb: KeybindingsManager;
-  private readonly onCompactCommand: () => boolean;
 
   public constructor(
     tui: TUI,
     editorTheme: EditorTheme,
     keybindings: KeybindingsManager,
-    getTheme: () => Theme,
-    getThinkingLevel: () => string,
-    onCompactCommand: () => boolean,
+    callbacks: YpiEditorCallbacks,
   ) {
     super(tui, editorTheme, keybindings, { embedWorkingStatus: true });
-    this.getTheme = getTheme;
-    this.getThinkingLevel = getThinkingLevel;
+    this.callbacks = callbacks;
     this.kb = keybindings;
-    this.onCompactCommand = onCompactCommand;
   }
 
   public override handleInput(data: string): void {
     if (this.kb.matches(data, "tui.input.submit") && !this.disableSubmit) {
       const trimmed = this.getText().trim();
-      if ((trimmed === "/compact" || trimmed.startsWith("/compact ")) && this.onCompactCommand()) {
+      if (trimmed === "/share" || trimmed === "/export" || trimmed.startsWith("/export ")) {
+        this.callbacks.onExportCommand();
+      }
+      if (
+        (trimmed === "/compact" || trimmed.startsWith("/compact ")) &&
+        this.callbacks.onCompactCommand()
+      ) {
         this.addToHistory(trimmed);
         this.setText("");
         return;
@@ -578,32 +585,33 @@ class YpiEditor extends CustomEditor {
 
   private railToken(): ForegroundToken {
     if (this.isBashDraft()) return "bashMode";
-    if (isCalmActive()) return "mdLink";
-    return thinkingTokenForLevel(this.getThinkingLevel());
+    const calm = this.callbacks.isCalmActive();
+    const activeToken = phaseRailToken(this.callbacks.getActivitySnapshot().phase, calm);
+    if (activeToken !== undefined) return activeToken;
+    if (calm) return "mdLink";
+    return thinkingTokenForLevel(this.callbacks.getThinkingLevel());
   }
 
   public override renderTopBorder(width: number, hiddenLineCount: number): string {
     if (width <= 0) return "";
-    const theme = this.getTheme();
-    const borderFn = (text: string) => theme.fg("borderMuted", text);
     const base = super.renderTopBorder(width, hiddenLineCount);
     const stripped = stripTerminalSequences(base);
-    const hasEmbedded = stripped.replaceAll("─", "").trim().length > 0;
-    if (hasEmbedded) return truncateToWidth(base, width, "");
+    const hasPiOverlay = stripped.replaceAll("─", "").trim().length > 0;
+    if (hasPiOverlay) return truncateToWidth(base, width, "");
 
-    if (isCalmActive() && width >= 18) {
-      const badge = ` ${theme.fg("mdLink", ICON_CALM)} ${theme.fg("dim", "calm")} `;
-      const fillCount = Math.max(0, width - 2 - visibleWidth(badge));
-      const line = borderFn("──") + badge + borderFn("─".repeat(fillCount));
-      return truncateToWidth(line, width, "");
-    }
-
-    return borderFn("─".repeat(width));
+    return renderActivityBorder({
+      width,
+      theme: this.callbacks.getTheme(),
+      snapshot: this.callbacks.getActivitySnapshot(),
+      tick: this.callbacks.getAnimationTick(),
+      calm: this.callbacks.isCalmActive(),
+      hiddenLineCount,
+    });
   }
 
   public override renderBottomBorder(width: number, hiddenLineCount: number): string {
     if (width <= 0) return "";
-    const theme = this.getTheme();
+    const theme = this.callbacks.getTheme();
     const borderFn = (text: string) => theme.fg("borderMuted", text);
 
     let rightTag = "";
@@ -631,12 +639,12 @@ class YpiEditor extends CustomEditor {
     const rawLines = super.render(innerWidth);
     if (rawLines.length < 3) return rawLines;
 
-    const theme = this.getTheme();
+    const theme = this.callbacks.getTheme();
     const lead = gutter === 3 ? " " : "";
     const trail = rightMargin === 1 ? " " : "";
     const token = this.railToken();
     const topPrefix = `${lead}${theme.fg(token, "╭")}${theme.fg("borderMuted", "─")}`;
-    const bodyPrefix = `${lead}${theme.fg(token, "┃")} `;
+    const bodyPrefix = `${lead}${theme.fg(token, "│")} `;
     const bottomPrefix = `${lead}${theme.fg(token, "╰")}${theme.fg("borderMuted", "─")}`;
     const acPrefix = " ".repeat(gutter);
     const bodyEnd = YpiEditor.findBottomBorderIndex(rawLines);
@@ -667,10 +675,82 @@ export default function ypiTui(pi: ExtensionAPI): void {
   let speed: { start: number; chars: number; lastRender: number } | undefined;
   let lastRate: number | undefined;
   let tierRoute: TierRoute | null = null;
-  let requestRender: (() => void) | undefined;
+  let requestFooterRender: (() => void) | undefined;
+  let requestEditorRender: (() => void) | undefined;
   let invalidateStats: (() => void) | undefined;
+  let calmActive = false;
   let stockExportRendering = false;
+  let exportWindow = false;
   let optchatActive = false;
+  let animationTick = 0;
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  let tickerIntervalMs = 0;
+  const toolRows = new Map<object, () => void>();
+
+  const requestAllRender = (): void => {
+    requestEditorRender?.();
+    requestFooterRender?.();
+  };
+
+  const repaintToolRows = (): void => {
+    for (const invalidate of toolRows.values()) {
+      invalidate();
+    }
+    requestAllRender();
+  };
+
+  const isHidingTools = (): boolean => calmActive && !stockExportRendering && !exportWindow;
+
+  const stopTicker = (): void => {
+    if (ticker !== undefined) {
+      clearInterval(ticker);
+      ticker = undefined;
+      tickerIntervalMs = 0;
+    }
+  };
+
+  const tickerSync: { run?: () => void } = {};
+
+  const activity = createActivityTracker(() => {
+    tickerSync.run?.();
+  });
+
+  const syncTicker = (): void => {
+    const active = activity.snapshot().phase !== "idle";
+    if (!active) {
+      stopTicker();
+      animationTick = 0;
+      requestEditorRender?.();
+      return;
+    }
+    const desiredMs = calmActive ? CALM_ACTIVITY_TICK_MS : ACTIVITY_TICK_MS;
+    if (ticker !== undefined && tickerIntervalMs === desiredMs) {
+      requestEditorRender?.();
+      return;
+    }
+    stopTicker();
+    tickerIntervalMs = desiredMs;
+    ticker = setInterval(() => {
+      animationTick += 1;
+      requestEditorRender?.();
+    }, desiredMs);
+    ticker.unref();
+    requestEditorRender?.();
+  };
+
+  tickerSync.run = syncTicker;
+
+  const applyCalmEvent = (data: unknown): void => {
+    const parsed = parseCalmEvent(data);
+    if (parsed === undefined) return;
+    if (parsed.active === calmActive && parsed.stockExportRendering === stockExportRendering) {
+      return;
+    }
+    calmActive = parsed.active;
+    stockExportRendering = parsed.stockExportRendering;
+    syncTicker();
+    repaintToolRows();
+  };
 
   pi.events.on("ypi:optchat-active", (data: unknown) => {
     if (isRecord(data) && typeof data["active"] === "boolean") {
@@ -678,21 +758,29 @@ export default function ypiTui(pi: ExtensionAPI): void {
     }
   });
 
-  pi.events.on("pi-tiers:route", (data: unknown) => {
-    tierRoute = parseTierRoute(data);
-    requestRender?.();
-  });
-
-  pi.events.on("firstmate:calm-presentation", (data: unknown) => {
-    if (isRecord(data) && typeof data["stockExportRendering"] === "boolean") {
-      stockExportRendering = data["stockExportRendering"];
-      requestRender?.();
+  pi.events.on(OPTCHAT_COMPACTING_EVENT, (data: unknown) => {
+    const parsed = parseCompactingEvent(data);
+    if (parsed === undefined) return;
+    if (parsed.active) {
+      activity.startCompacting("optchat", parsed.detail);
+    } else {
+      activity.stopCompacting("optchat");
     }
   });
 
-  onCalmChange(() => {
-    requestRender?.();
+  pi.events.on("pi-tiers:route", (data: unknown) => {
+    tierRoute = parseTierRoute(data);
+    requestFooterRender?.();
   });
+
+  pi.events.on(CALM_EVENT, applyCalmEvent);
+  pi.events.on(LEGACY_CALM_EVENT, applyCalmEvent);
+
+  const rememberToolRow = (context: { state: unknown; invalidate?: () => void }): void => {
+    if (isRecord(context.state) && typeof context.invalidate === "function") {
+      toolRows.set(context.state, context.invalidate);
+    }
+  };
 
   pi.registerToolRenderer((toolName, resolveNext): ToolRenderers => {
     const base = resolveNext();
@@ -704,7 +792,18 @@ export default function ypiTui(pi: ExtensionAPI): void {
     return {
       renderShell: "self",
       renderCall(args, theme, context) {
-        if (!isCalmActive() && context.expanded && base?.renderCall !== undefined) {
+        rememberToolRow(context);
+        const state: ToolLineState = isRecord(context.state) ? context.state : {};
+        state.args = args;
+        state.isPartial = context.isPartial;
+        state.isError = context.isError;
+        state.durationMs = context.durationMs;
+
+        if (isHidingTools()) {
+          return emptyComponent;
+        }
+
+        if (context.expanded && base?.renderCall !== undefined) {
           const inner = base.renderCall(args, theme, context);
           if (base.renderShell === "self") return inner;
           const bgToken = context.isPartial
@@ -717,18 +816,12 @@ export default function ypiTui(pi: ExtensionAPI): void {
           return box;
         }
 
-        const state: ToolLineState = isRecord(context.state) ? context.state : {};
-        state.args = args;
-        state.isPartial = context.isPartial;
-        state.isError = context.isError;
-        state.durationMs = context.durationMs;
-
         return {
           render(width: number): string[] {
-            if (isCalmActive() && !stockExportRendering) return [];
+            if (isHidingTools()) return [];
             if (width <= 0) return [];
             const margin = width >= 24 ? " " : "";
-            const rail = theme.fg("borderMuted", "┃");
+            const rail = theme.fg("borderMuted", "│");
             const glyph =
               state.isPartial === true
                 ? theme.fg("warning", "◐")
@@ -749,13 +842,18 @@ export default function ypiTui(pi: ExtensionAPI): void {
         };
       },
       renderResult(result, options, theme, context) {
+        rememberToolRow(context);
         const state: ToolLineState = isRecord(context.state) ? context.state : {};
         state.isPartial = options.isPartial;
         state.isError = context.isError;
         state.durationMs = context.durationMs;
         state.resultText = extractResultText(result.content);
 
-        if (!isCalmActive() && options.expanded) {
+        if (isHidingTools()) {
+          return emptyComponent;
+        }
+
+        if (options.expanded) {
           if (base?.renderResult !== undefined) {
             const inner = base.renderResult(result, options, theme, context);
             if (base.renderShell === "self") return inner;
@@ -782,32 +880,39 @@ export default function ypiTui(pi: ExtensionAPI): void {
   });
 
   function installEditor(ctx: ExtensionContext): void {
-    ctx.ui.setEditorComponent(
-      (tui, editorTheme, keybindings) =>
-        new YpiEditor(
-          tui,
-          editorTheme,
-          keybindings,
-          () => ctx.ui.theme,
-          () => pi.getThinkingLevel(),
-          () => {
-            if (!optchatActive) return false;
-            pi.events.emit("ypi:optchat-fold", { ctx });
-            return true;
-          },
-        ),
-    );
+    ctx.ui.setEditorComponent((tui, editorTheme, keybindings) => {
+      requestEditorRender = () => {
+        tui.requestRender();
+      };
+      return new YpiEditor(tui, editorTheme, keybindings, {
+        getTheme: () => ctx.ui.theme,
+        getThinkingLevel: () => pi.getThinkingLevel(),
+        isCalmActive: () => calmActive,
+        getActivitySnapshot: () => activity.snapshot(),
+        getAnimationTick: () => animationTick,
+        onCompactCommand: () => {
+          if (!optchatActive) return false;
+          pi.events.emit("ypi:optchat-fold", { ctx });
+          return true;
+        },
+        onExportCommand: () => {
+          exportWindow = true;
+          repaintToolRows();
+          setTimeout(() => {
+            exportWindow = false;
+            repaintToolRows();
+          }, 0);
+        },
+      });
+    });
   }
 
   function installFooter(ctx: ExtensionContext): void {
     ctx.ui.setFooter((tui, theme, footerData) => {
-      requestRender = () => {
+      requestFooterRender = () => {
         tui.requestRender();
       };
       const unsubscribeBranch = footerData.onBranchChange(() => {
-        tui.requestRender();
-      });
-      const unsubscribeCalm = onCalmChange(() => {
         tui.requestRender();
       });
       let cache:
@@ -857,7 +962,7 @@ export default function ypiTui(pi: ExtensionAPI): void {
         const cwd = formatCwd(ctx.sessionManager.getCwd());
         const branch = footerData.getGitBranch();
         const sessionName = readStats().name;
-        const calmPill = isCalmActive() ? `${GAP}${theme.fg("mdLink", `${ICON_CALM} calm`)}` : "";
+        const calmPill = calmActive ? `${GAP}${theme.fg("mdLink", `${ICON_CALM} calm`)}` : "";
         const build = (pathText: string): string => {
           let row = `${theme.fg("accent", ICON_DIR)} ${theme.fg("text", pathText)}`;
           if (branch !== null && branch.length > 0) {
@@ -926,8 +1031,7 @@ export default function ypiTui(pi: ExtensionAPI): void {
       return {
         dispose() {
           unsubscribeBranch();
-          unsubscribeCalm();
-          requestRender = undefined;
+          requestFooterRender = undefined;
           invalidateStats = undefined;
         },
         invalidate() {
@@ -947,27 +1051,38 @@ export default function ypiTui(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", (_event, ctx) => {
+    toolRows.clear();
+    exportWindow = false;
+    calmActive = loadCalmPreference();
+    activity.reset();
+    stopTicker();
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
-    installIndicator(ctx);
+    ctx.ui.setWorkingVisible(false);
     installHeader(ctx);
     installEditor(ctx);
     installFooter(ctx);
   });
 
+  pi.on("agent_start", () => {
+    activity.startAgent();
+  });
+
   pi.on("turn_start", () => {
     speed = { start: Date.now(), chars: 0, lastRender: 0 };
+    activity.startTurn();
   });
 
   pi.on("message_update", (event) => {
-    if (speed === undefined) return;
     const update = event.assistantMessageEvent;
+    activity.onAssistantEvent(update.type);
+    if (speed === undefined) return;
     if (update.type !== "text_delta" && update.type !== "thinking_delta") return;
     speed.chars += update.delta.length;
     const now = Date.now();
     if (now - speed.lastRender < SPEED_RENDER_INTERVAL_MS) return;
     speed.lastRender = now;
     lastRate = speed.chars / 4 / Math.max(0.001, (now - speed.start) / 1000);
-    requestRender?.();
+    requestFooterRender?.();
   });
 
   pi.on("message_end", (event) => {
@@ -976,24 +1091,56 @@ export default function ypiTui(pi: ExtensionAPI): void {
     const usage = parseUsage(Reflect.get(event.message, "usage"));
     const tokens = usage?.output !== undefined && usage.output > 0 ? usage.output : speed.chars / 4;
     if (tokens > 0) lastRate = tokens / seconds;
-    requestRender?.();
+    requestFooterRender?.();
+  });
+
+  pi.on("tool_execution_start", (event) => {
+    activity.startTool(event.toolCallId, event.toolName);
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    activity.endTool(event.toolCallId);
   });
 
   pi.on("agent_settled", () => {
     speed = undefined;
-    requestRender?.();
+    activity.settleAgent();
+    requestFooterRender?.();
+  });
+
+  pi.on("session_before_compact", () => {
+    if (!optchatActive) {
+      activity.startCompacting("pi");
+    }
+  });
+
+  pi.on("session_compact", () => {
+    activity.stopCompacting("pi");
+    invalidateStats?.();
+    requestAllRender();
+  });
+
+  pi.on("session_compact_failed", () => {
+    activity.stopCompacting("pi");
+    requestAllRender();
   });
 
   pi.on("session_tree", () => {
     invalidateStats?.();
-    requestRender?.();
+    requestFooterRender?.();
   });
 
   pi.on("model_select", () => {
-    requestRender?.();
+    requestFooterRender?.();
   });
 
   pi.on("thinking_level_select", () => {
-    requestRender?.();
+    requestAllRender();
+  });
+
+  pi.on("session_shutdown", () => {
+    activity.reset();
+    stopTicker();
+    toolRows.clear();
   });
 }

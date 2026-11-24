@@ -7,17 +7,9 @@ const DEFAULT_FOLD_TOKENS = 150_000;
 const DEFAULT_COMPACTOR_PROVIDER = "tier";
 const DEFAULT_COMPACTOR_MODEL = "compact";
 
-export const ThinkingLevelSchema = z.enum([
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]);
+const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
-export const OptChatConfigSchema = z.object({
+const OptChatConfigSchema = z.object({
   enabled: z.boolean().default(true),
   memoryHome: z.string().min(1).optional(),
   profile: z
@@ -34,7 +26,7 @@ export const OptChatConfigSchema = z.object({
   transientCustomTypes: z.array(z.string().min(1)).default([]),
 });
 
-export type OptChatConfig = z.infer<typeof OptChatConfigSchema>;
+type OptChatConfig = z.infer<typeof OptChatConfigSchema>;
 
 export interface ResolvedOptChatConfig {
   readonly configPath: string | undefined;
@@ -69,7 +61,7 @@ function isDisabledByEnv(env: NodeJS.ProcessEnv): boolean {
   return raw === "0" || raw === "false" || raw === "off" || raw === "no";
 }
 
-export function findOptChatConfigPath(
+function findOptChatConfigPath(
   cwd: string = process.cwd(),
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {

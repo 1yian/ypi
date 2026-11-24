@@ -81,6 +81,12 @@
   },
   "overrides": [
     {
+      "files": ["e2e/**/*.ts"],
+      "rules": {
+        "ypi/no-kill-by-name": "error"
+      }
+    },
+    {
       "files": ["src/optchat.ts", "src/tui.ts", "src/calm.ts"],
       "rules": {
         "import/no-default-export": "off"

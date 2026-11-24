@@ -2,31 +2,28 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-type CalmListener = (active: boolean) => void;
+export const CALM_EVENT = "ypi:calm";
+export const LEGACY_CALM_EVENT = "firstmate:calm-presentation";
 
-let active = false;
-const listeners = new Set<CalmListener>();
-
-export function isCalmActive(): boolean {
-  return active;
+export interface CalmEventPayload {
+  readonly active: boolean;
+  readonly stockExportRendering: boolean;
 }
 
-export function setCalmActive(next: boolean): void {
-  if (active === next) return;
-  active = next;
-  for (const listener of listeners) {
-    listener(active);
-  }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-export function onCalmChange(listener: CalmListener): () => void {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
+export function parseCalmEvent(data: unknown): CalmEventPayload | undefined {
+  if (!isRecord(data)) return undefined;
+  if (typeof data["active"] !== "boolean") return undefined;
+  return {
+    active: data["active"],
+    stockExportRendering: data["stockExportRendering"] === true,
   };
 }
 
-export function resolveCalmPreferencePath(): string {
+function resolveCalmPreferencePath(): string {
   const override = process.env["YPI_CALM_FILE"]?.trim();
   if (override !== undefined && override.length > 0) {
     return resolve(override.replace(/^~(?=\/|$)/u, homedir()));

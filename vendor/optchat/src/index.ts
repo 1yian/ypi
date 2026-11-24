@@ -471,7 +471,8 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
         };
         show();
         const unsubscribe = a.memory.onChange(show);
-        try { await a.memory.settle(ctx.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); }
+        pi.events.emit('ypi:optchat-compacting', { active: true });
+        try { await a.memory.settle(ctx.signal); } finally { unsubscribe(); ctx.ui.setWorkingMessage(); pi.events.emit('ypi:optchat-compacting', { active: false }); }
         view = a.memory.render(); // Capture old history before logging the new input.
         flush();
       }
@@ -483,10 +484,12 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
       const refresh = refreshPoint(run, keep, refreshBudget(ctx.model?.contextWindow, capabilities.foldTokens === undefined ? refreshFraction(a.config.refreshAt) : 0));
       if (refresh) {
         const { cut, size } = refresh, began = Date.now();
-        ctx.ui.setWorkingMessage(`OptChat: moving this turn's ${Math.round(size / 4000)}k tokens into memory…`);
-        try { flush(); await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); }
+        const detail = `${Math.round(size / 4000)}k`;
+        ctx.ui.setWorkingMessage(`OptChat: moving this turn's ${detail} tokens into memory…`);
+        pi.events.emit('ypi:optchat-compacting', { active: true, detail });
+        try { flush(); await a.memory.settle(ctx.signal); } finally { ctx.ui.setWorkingMessage(); pi.events.emit('ypi:optchat-compacting', { active: false }); }
         view = a.memory.render(); keep = cut;
-        ctx.ui.notify(`OptChat moved ${Math.round(size / 4000)}k tokens of this turn into memory (${((Date.now() - began) / 1000).toFixed(1)}s).`, 'info');
+        ctx.ui.notify(`OptChat moved ${detail} tokens of this turn into memory (${((Date.now() - began) / 1000).toFixed(1)}s).`, 'info');
       }
       // Built on every call, unlike the view, so it is never out of date; it goes last, after everything cached.
       return { messages: buildContext(event.messages, refreshedRun(run, keep, TURN_REFRESHED), view, promptFor(prompt, a.config), previous, atWork(a.children.working)) };
@@ -509,6 +512,7 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
       flush();
       const label = foldedTokens >= 1000 ? `${Math.round(foldedTokens / 1000)}k` : `${foldedTokens}`;
       ctx.ui.setWorkingMessage(`OptChat: folding ${label} tokens into memory…`);
+      pi.events.emit('ypi:optchat-compacting', { active: true, ...(foldedTokens > 0 ? { detail: label } : {}) });
       await a.memory.settle(signal);
       run = [];
       capped = 0;
@@ -528,6 +532,7 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
       ctx.ui.notify(`OptChat fold failed: ${errorText(error)}`, 'error');
     } finally {
       ctx.ui.setWorkingMessage();
+      pi.events.emit('ypi:optchat-compacting', { active: false });
     }
   };
   pi.events.on('ypi:optchat-fold', (data: unknown) => {

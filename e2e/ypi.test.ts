@@ -3,15 +3,54 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { Theme, type ThemeBg, type ThemeColor } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  createEventBus,
+  discoverAndLoadExtensions,
+  ExtensionRunner,
+  initTheme,
+  ModelRegistry,
+  ModelRuntime,
+  SessionManager,
+  Theme,
+  ToolExecutionComponent,
+  type ExtensionUIContext,
+  type ThemeBg,
+  type ThemeColor,
+  type ToolRenderers,
+} from "@earendil-works/pi-coding-agent";
+import {
+  KeybindingsManager as TuiKeybindingsManager,
+  stripTerminalSequences,
+  Text,
+  TUI_KEYBINDINGS,
+  TuiMainScreen,
+  visibleWidth,
+  type Component,
+  type EditorTheme,
+  type Terminal,
+} from "@earendil-works/pi-tui";
 import { z } from "zod";
-import { createCalmHarborAnimation } from "../src/calm-animation.ts";
+import { createActivityTracker, OPTCHAT_COMPACTING_EVENT } from "../src/activity.ts";
+import { renderActivityBorder } from "../src/activity-renderer.ts";
 import { loadCalmPreference, saveCalmPreference } from "../src/calm-state.ts";
 import { loadOptChatConfig } from "../src/config.ts";
 import { buildPiLaunchPlan } from "../src/launch.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
+
+type EditorFactoryFn = NonNullable<Parameters<ExtensionUIContext["setEditorComponent"]>[0]>;
+
+const noop = () => undefined;
+const identity = (text: string) => text;
+
+function isRenderableComponent(value: unknown): value is Component {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "render" in value &&
+    typeof Reflect.get(value, "render") === "function"
+  );
+}
 
 const StringArray = z.array(z.string());
 const StringMap = z.record(z.string(), z.string());
@@ -148,6 +187,113 @@ function buildThemeFromJson(filePath: string): Theme {
   return built;
 }
 
+function createHeadlessTerminal(): Terminal {
+  return {
+    start: noop,
+    stop: noop,
+    drainInput: () => Promise.resolve(),
+    write: noop,
+    columns: 90,
+    rows: 30,
+    kittyProtocolActive: false,
+    moveBy: noop,
+    hideCursor: noop,
+    showCursor: noop,
+    clearLine: noop,
+    clearFromCursor: noop,
+    clearScreen: noop,
+    setTitle: noop,
+    setProgress: noop,
+    setProgramStatus: noop,
+  };
+}
+
+interface CapturedUiState {
+  workingVisible: boolean | undefined;
+  hiddenThinkingLabel: string | undefined;
+  editorFactory: EditorFactoryFn | undefined;
+  readonly notifications: string[];
+}
+
+function createTestUiContext(theme: Theme, captured: CapturedUiState): ExtensionUIContext {
+  let editorText = "";
+  let toolsExpanded = false;
+  return {
+    select: () => Promise.resolve(undefined),
+    confirm: () => Promise.resolve(false),
+    input: () => Promise.resolve(undefined),
+    notify(message: string) {
+      captured.notifications.push(message);
+    },
+    onTerminalInput: () => noop,
+    setStatus: noop,
+    setWorkingMessage: noop,
+    setWorkingVisible(visible: boolean) {
+      captured.workingVisible = visible;
+    },
+    setWorkingIndicator: noop,
+    setHiddenThinkingLabel(label?: string) {
+      captured.hiddenThinkingLabel = label;
+    },
+    setWidget: noop,
+    setFooter: noop,
+    setHeader: noop,
+    setTitle: noop,
+    custom: () => Promise.reject(new Error("custom UI not used in headless test")),
+    pasteToEditor(text: string) {
+      editorText += text;
+    },
+    setEditorText(text: string) {
+      editorText = text;
+    },
+    getEditorText: () => editorText,
+    editor: () => Promise.resolve(undefined),
+    addAutocompleteProvider: noop,
+    setEditorComponent(factory: EditorFactoryFn | undefined) {
+      captured.editorFactory = factory;
+    },
+    getEditorComponent: () => captured.editorFactory,
+    theme,
+    getAllThemes: () => [{ name: theme.name ?? "ypi", path: undefined }],
+    getTheme: () => theme,
+    setTheme: () => ({ success: true }),
+    getToolsExpanded: () => toolsExpanded,
+    setToolsExpanded(expanded: boolean) {
+      toolsExpanded = expanded;
+    },
+  };
+}
+
+function assertBorderFitsWidths(theme: Theme, calm: boolean): void {
+  const snapshots = [
+    { phase: "idle" as const, detail: undefined, startedAt: 0, activeToolCount: 0 },
+    { phase: "thinking" as const, detail: undefined, startedAt: 1000, activeToolCount: 0 },
+    { phase: "working" as const, detail: undefined, startedAt: 1000, activeToolCount: 1 },
+    { phase: "command" as const, detail: undefined, startedAt: 1000, activeToolCount: 1 },
+    { phase: "compacting" as const, detail: "18k", startedAt: 1000, activeToolCount: 0 },
+  ];
+
+  for (const snapshot of snapshots) {
+    for (const width of [12, 18, 24, 34, 48, 80, 140]) {
+      for (let tick = 0; tick < 24; tick += 3) {
+        const line = renderActivityBorder({
+          width,
+          theme,
+          snapshot,
+          tick,
+          calm,
+          hiddenLineCount: width >= 80 ? 2 : 0,
+          now: 14_000,
+        });
+        assert.ok(
+          visibleWidth(line) <= width,
+          `border overflow at width ${width} (calm=${String(calm)}, phase=${snapshot.phase}): ${visibleWidth(line)}`,
+        );
+      }
+    }
+  }
+}
+
 void test("package.json declares a valid pi-package manifest and every extension and theme path resolves", () => {
   const rawPkg: unknown = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
   const pkg = PackageManifestSchema.parse(rawPkg);
@@ -188,32 +334,103 @@ void test("bundled ypi and ypi-light themes resolve every variable and instantia
   assert.equal(light.appearance, "light");
 });
 
-void test("calm harbor animation fits every terminal width cleanly and persists calm preference", () => {
-  const theme = buildThemeFromJson(join(ROOT, "themes", "ypi.json"));
-  const animation = createCalmHarborAnimation();
-  animation.setPhase("reading");
+void test("activity tracker distinguishes thinking, working, waiting for command, and compacting", () => {
+  let changes = 0;
+  const tracker = createActivityTracker(() => {
+    changes += 1;
+  });
 
-  for (const width of [10, 18, 28, 48, 80, 120]) {
-    for (let step = 0; step < 12; step += 1) {
-      animation.tick();
-      const lines = animation.render(width, theme);
-      assert.ok(lines.length > 0 && lines.length <= 3, `unexpected row count at width ${width}`);
-      for (const line of lines) {
-        assert.ok(
-          visibleWidth(line) <= width,
-          `line exceeded width ${width}: ${visibleWidth(line)}`,
-        );
-      }
-    }
-  }
+  assert.equal(tracker.snapshot().phase, "idle");
 
-  const widePlain = animation
-    .render(90, theme)
-    .map((line) => stripTerminalSequences(line))
-    .join("\n");
-  assert.ok(widePlain.includes("☾"), "wide frame should render the crescent moon");
-  assert.ok(widePlain.includes("╲▁▁▁╱"), "wide frame should render the sailboat hull");
-  assert.ok(widePlain.includes("calm · reading"), "wide frame should show the quiet status phase");
+  tracker.startAgent(1000);
+  assert.equal(tracker.snapshot().phase, "thinking");
+
+  tracker.onAssistantEvent("text_delta");
+  assert.equal(tracker.snapshot().phase, "working");
+
+  tracker.onAssistantEvent("thinking_delta");
+  assert.equal(tracker.snapshot().phase, "thinking");
+
+  tracker.startTool("call-1", "read", 2000);
+  assert.equal(tracker.snapshot().phase, "working");
+
+  tracker.startTool("call-2", "bash", 2500);
+  assert.equal(tracker.snapshot().phase, "command");
+
+  tracker.endTool("call-1");
+  assert.equal(tracker.snapshot().phase, "command");
+
+  tracker.endTool("call-2");
+  assert.equal(tracker.snapshot().phase, "thinking");
+
+  tracker.startCompacting("optchat", "18k", 3000);
+  assert.equal(tracker.snapshot().phase, "compacting");
+  assert.equal(tracker.snapshot().detail, "18k");
+
+  tracker.stopCompacting("optchat");
+  assert.equal(tracker.snapshot().phase, "thinking");
+  assert.equal(tracker.snapshot().detail, undefined);
+
+  tracker.settleAgent();
+  assert.equal(tracker.snapshot().phase, "idle");
+
+  tracker.startCompacting("optchat", "42k", 5000);
+  assert.equal(tracker.snapshot().phase, "compacting");
+  assert.equal(tracker.snapshot().detail, "42k");
+  tracker.stopCompacting("optchat");
+  assert.equal(tracker.snapshot().phase, "idle");
+  assert.ok(changes >= 10);
+});
+
+void test("OpenCode/OMP activity border fits every width cleanly in both normal and calm zen modes", () => {
+  const dark = buildThemeFromJson(join(ROOT, "themes", "ypi.json"));
+  const light = buildThemeFromJson(join(ROOT, "themes", "ypi-light.json"));
+
+  assertBorderFitsWidths(dark, false);
+  assertBorderFitsWidths(dark, true);
+  assertBorderFitsWidths(light, false);
+  assertBorderFitsWidths(light, true);
+
+  const thinkingLine = stripTerminalSequences(
+    renderActivityBorder({
+      width: 90,
+      theme: dark,
+      snapshot: { phase: "thinking", detail: undefined, startedAt: 1000, activeToolCount: 0 },
+      tick: 3,
+      calm: false,
+      hiddenLineCount: 0,
+      now: 14_000,
+    }),
+  );
+  assert.ok(thinkingLine.includes("thinking"));
+  assert.ok(thinkingLine.includes("0:13 · esc"));
+
+  const commandLine = stripTerminalSequences(
+    renderActivityBorder({
+      width: 90,
+      theme: dark,
+      snapshot: { phase: "command", detail: undefined, startedAt: 1000, activeToolCount: 1 },
+      tick: 4,
+      calm: false,
+      hiddenLineCount: 0,
+      now: 9000,
+    }),
+  );
+  assert.ok(commandLine.includes("waiting for command"));
+
+  const compactLine = stripTerminalSequences(
+    renderActivityBorder({
+      width: 90,
+      theme: dark,
+      snapshot: { phase: "compacting", detail: "18k", startedAt: 1000, activeToolCount: 0 },
+      tick: 5,
+      calm: true,
+      hiddenLineCount: 0,
+      now: 5000,
+    }),
+  );
+  assert.ok(compactLine.includes("compacting · 18k"));
+  assert.ok(compactLine.includes("☾ calm · 0:04"));
 
   const dir = join(tmpdir(), `ypi-calm-e2e-${Date.now()}`);
   mkdirSync(dir, { recursive: true });
@@ -225,6 +442,207 @@ void test("calm harbor animation fits every terminal width cleanly and persists 
     saveCalmPreference(false, prefFile);
     assert.equal(loadCalmPreference(prefFile), false);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+void test("Pi isolated extension loading hides all tool calls in calm mode, shows phases, and uses uniform editor rail strokes", async () => {
+  const dir = join(tmpdir(), `ypi-pi-e2e-${Date.now()}`);
+  const agentDir = join(dir, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  const prevCalmFile = process.env["YPI_CALM_FILE"];
+  process.env["YPI_CALM_FILE"] = join(dir, "ypi-calm");
+
+  try {
+    initTheme("dark");
+    const theme = buildThemeFromJson(join(ROOT, "themes", "ypi.json"));
+    const eventBus = createEventBus();
+    const loaded = await discoverAndLoadExtensions(
+      [join(ROOT, "src", "tui.ts"), join(ROOT, "src", "calm.ts")],
+      dir,
+      agentDir,
+      eventBus,
+    );
+    assert.deepEqual(loaded.errors, []);
+    assert.equal(loaded.extensions.length, 2);
+
+    const modelRuntime = await ModelRuntime.create({
+      refreshOnCreate: false,
+      allowModelNetwork: false,
+      modelsPath: null,
+    });
+    const modelRegistry = new ModelRegistry(modelRuntime);
+    const sessionManager = SessionManager.inMemory(dir);
+    const runner = new ExtensionRunner(
+      loaded.extensions,
+      loaded.runtime,
+      dir,
+      sessionManager,
+      modelRegistry,
+    );
+
+    runner.bindCore(
+      {
+        sendMessage: noop,
+        sendUserMessage: noop,
+        appendEntry: noop,
+        setSessionName: noop,
+        getSessionName: () => undefined,
+        setLabel: noop,
+        getActiveTools: () => [],
+        getAllTools: () => [],
+        setActiveTools: noop,
+        refreshTools: noop,
+        getCommands: () => [],
+        setModel: () => Promise.resolve(false),
+        getThinkingLevel: () => "medium",
+        setThinkingLevel: noop,
+        getSettings: () => ({}),
+      },
+      {
+        getModel: () => undefined,
+        getScopedModels: () => [],
+        isIdle: () => true,
+        isProjectTrusted: () => true,
+        getSignal: () => undefined,
+        abort: noop,
+        shutdown: noop,
+        hasPendingMessages: () => false,
+        getContextUsage: () => undefined,
+        compact: noop,
+        getSystemPrompt: () => "",
+        getSystemPromptOptions: () => ({
+          selectedTools: [],
+          cwd: dir,
+          contextFiles: [],
+          skills: [],
+        }),
+        executeTool: () => Promise.reject(new Error("not used")),
+        getCallableTools: () => [],
+      },
+    );
+
+    const captured: CapturedUiState = {
+      workingVisible: undefined,
+      hiddenThinkingLabel: "Thinking...",
+      editorFactory: undefined,
+      notifications: [],
+    };
+    runner.setUIContext(createTestUiContext(theme, captured), "tui");
+
+    await runner.emit({ type: "session_start", reason: "startup" });
+    assert.equal(captured.workingVisible, false);
+
+    const baseRenderers: ToolRenderers = {
+      renderCall: () => new Text("expanded base call", 0, 0),
+      renderResult: () => new Text("expanded base output", 0, 0),
+    };
+    const resolvedTool = runner.resolveToolRenderers("bash", () => baseRenderers);
+    assert.ok(resolvedTool !== undefined);
+
+    const tui = new TuiMainScreen(createHeadlessTerminal());
+    const toolRow = new ToolExecutionComponent(
+      "bash",
+      "tc-1",
+      { command: "echo hello" },
+      { showImages: false },
+      resolvedTool,
+      tui,
+      dir,
+    );
+    toolRow.updateResult(
+      { content: [{ type: "text", text: "hello\nworld" }], isError: false },
+      false,
+    );
+
+    const normalToolLines = toolRow.render(80).map((line) => stripTerminalSequences(line));
+    const joinedNormalTool = normalToolLines.join("\n");
+    assert.ok(joinedNormalTool.includes("bash"));
+    assert.ok(joinedNormalTool.includes("│"), "tool rail should use thin │ stroke");
+    assert.ok(!joinedNormalTool.includes("┃"), "tool rail must not use thick ┃ stroke");
+
+    const calmCommand = runner.getCommand("calm");
+    assert.ok(calmCommand !== undefined);
+    await calmCommand.handler("on", runner.createCommandContext());
+
+    assert.equal(captured.hiddenThinkingLabel, "");
+    assert.deepEqual(
+      toolRow.render(80),
+      [],
+      "existing tool row must hide immediately in calm mode",
+    );
+
+    toolRow.setExpanded(true);
+    assert.deepEqual(toolRow.render(80), [], "expanded tool row must stay hidden in calm mode");
+
+    assert.ok(captured.editorFactory !== undefined);
+    const editorTheme: EditorTheme = {
+      borderColor: identity,
+      selectList: {
+        selectedPrefix: identity,
+        selectedText: identity,
+        description: identity,
+        scrollInfo: identity,
+        noMatch: identity,
+      },
+    };
+    const editorRaw: unknown = Reflect.apply(captured.editorFactory, undefined, [
+      tui,
+      editorTheme,
+      new TuiKeybindingsManager(TUI_KEYBINDINGS),
+    ]);
+    assert.ok(isRenderableComponent(editorRaw), "expected editor component");
+
+    const idleCalmLines = editorRaw.render(90).map((line) => stripTerminalSequences(line));
+    const topIdle = idleCalmLines[0] ?? "";
+    const bodyIdle = idleCalmLines[1] ?? "";
+    const bottomIdle = idleCalmLines.at(-1) ?? "";
+    assert.ok(topIdle.includes("╭"));
+    assert.ok(topIdle.includes("☾ calm"));
+    assert.ok(bodyIdle.includes("│"));
+    assert.ok(!bodyIdle.includes("┃"), "editor rail must match thin ╭/╰ corners with │");
+    assert.ok(bottomIdle.includes("╰"));
+
+    await runner.emit({ type: "agent_start" });
+    const thinkingTop = stripTerminalSequences(editorRaw.render(90)[0] ?? "");
+    assert.ok(thinkingTop.includes("thinking"));
+    assert.ok(thinkingTop.includes("☾ calm"));
+
+    await runner.emit({
+      type: "tool_execution_start",
+      toolCallId: "tc-2",
+      toolName: "bash",
+      args: { command: "sleep 1" },
+    });
+    const commandTop = stripTerminalSequences(editorRaw.render(90)[0] ?? "");
+    assert.ok(commandTop.includes("waiting for command"));
+
+    eventBus.emit(OPTCHAT_COMPACTING_EVENT, { active: true, detail: "24k" });
+    const compactTop = stripTerminalSequences(editorRaw.render(90)[0] ?? "");
+    assert.ok(compactTop.includes("compacting · 24k"));
+    eventBus.emit(OPTCHAT_COMPACTING_EVENT, { active: false });
+
+    await runner.emit({
+      type: "tool_execution_end",
+      toolCallId: "tc-2",
+      toolName: "bash",
+      result: { content: [{ type: "text", text: "" }], details: undefined },
+      isError: false,
+    });
+    await runner.emit({ type: "agent_settled", aborted: false });
+
+    await calmCommand.handler("off", runner.createCommandContext());
+    assert.equal(captured.hiddenThinkingLabel, undefined);
+    const restoredToolLines = toolRow.render(80).map((line) => stripTerminalSequences(line));
+    assert.ok(restoredToolLines.length > 0, "tool row must reappear when calm mode turns off");
+
+    await runner.emit({ type: "session_shutdown", reason: "quit" });
+  } finally {
+    if (prevCalmFile === undefined) {
+      delete process.env["YPI_CALM_FILE"];
+    } else {
+      process.env["YPI_CALM_FILE"] = prevCalmFile;
+    }
     rmSync(dir, { recursive: true, force: true });
   }
 });
