@@ -9,6 +9,7 @@ import { z } from "zod";
 import { createCalmHarborAnimation } from "../src/calm-animation.ts";
 import { loadCalmPreference, saveCalmPreference } from "../src/calm-state.ts";
 import { loadOptChatConfig } from "../src/config.ts";
+import { buildPiLaunchPlan } from "../src/launch.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 
@@ -258,6 +259,72 @@ void test("loadOptChatConfig resolves provider-agnostic compactor and fold setti
 
     writeFileSync(configPath, JSON.stringify({ enabled: false }));
     assert.equal(loadOptChatConfig(dir, configPath), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+void test("buildPiLaunchPlan wires bundled extensions, avoids duplicates, and respects flags", () => {
+  const dir = join(tmpdir(), `ypi-launch-e2e-${Date.now()}`);
+  const agentDir = join(dir, "agent");
+  mkdirSync(agentDir, { recursive: true });
+  try {
+    const clean = buildPiLaunchPlan(["-p", "hello"], {
+      packageRoot: ROOT,
+      cwd: dir,
+      env: { PI_CODING_AGENT_DIR: agentDir },
+    });
+    assert.equal(clean.kind, "exec");
+    assert.ok(clean.args.includes("--use-theme"));
+    assert.ok(clean.args.includes("ypi"));
+    assert.ok(clean.args.some((arg) => arg.endsWith("pi-tiers/src/index.ts")));
+    assert.ok(clean.args.some((arg) => arg.endsWith("src/tui.ts")));
+    assert.ok(clean.args.some((arg) => arg.endsWith("src/calm.ts")));
+    assert.deepEqual(clean.args.slice(-2), ["-p", "hello"]);
+
+    writeFileSync(
+      join(agentDir, "settings.json"),
+      JSON.stringify({
+        packages: ["npm:pi-web-access@0.48.0", "git:github.com/1yian/pi-tiers@main"],
+      }),
+    );
+    const deduped = buildPiLaunchPlan(["--use-theme", "ypi-light"], {
+      packageRoot: ROOT,
+      cwd: dir,
+      env: { PI_CODING_AGENT_DIR: agentDir },
+    });
+    assert.ok(!deduped.args.some((arg) => arg.endsWith("pi-tiers/src/index.ts")));
+    assert.ok(!deduped.args.some((arg) => arg.endsWith("pi-web-access/dist")));
+    assert.ok(deduped.args.some((arg) => arg.endsWith("@ff-labs/pi-fff/src/index.ts")));
+    assert.ok(deduped.args.some((arg) => arg.endsWith("src/tui.ts")));
+    assert.equal(
+      deduped.args.filter((arg) => arg === "--use-theme").length,
+      1,
+      "must not duplicate user --use-theme",
+    );
+
+    const isolated = buildPiLaunchPlan(["--isolated", "-c"], {
+      packageRoot: ROOT,
+      cwd: dir,
+      env: { PI_CODING_AGENT_DIR: agentDir },
+    });
+    assert.ok(isolated.args.includes("--no-extensions"));
+    assert.ok(isolated.args.some((arg) => arg.endsWith("pi-tiers/src/index.ts")));
+    assert.ok(!isolated.args.includes("--isolated"));
+
+    const passthrough = buildPiLaunchPlan(["auth", "status"], {
+      packageRoot: ROOT,
+      cwd: dir,
+      env: { PI_CODING_AGENT_DIR: agentDir },
+    });
+    assert.deepEqual(passthrough.args, ["auth", "status"]);
+
+    const help = buildPiLaunchPlan(["--ypi-help"], {
+      packageRoot: ROOT,
+      cwd: dir,
+      env: { PI_CODING_AGENT_DIR: agentDir },
+    });
+    assert.equal(help.kind, "help");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -14,6 +14,27 @@ No hardcoded user paths, no hardcoded providers, no orchestrator coupling. Bring
 
 ## Install
 
+### Run as a command (`ypi`)
+
+```bash
+git clone https://github.com/1yian/ypi.git
+cd ypi && bun install
+ln -sf "$PWD/src/bin.ts" ~/.local/bin/ypi
+```
+
+Then just launch Pi with the full `ypi` bundle, theme, TUI, and `/calm` anywhere:
+
+```bash
+ypi
+ypi -c
+ypi --isolated
+ypi --ypi-help
+```
+
+All standard `pi` flags and subcommands (`ypi -p ...`, `ypi --model ...`, `ypi auth ...`) pass straight through. `ypi` automatically skips re-loading `pi-tiers`, `pi-web-access`, or `@ff-labs/pi-fff` if you already have them in `~/.pi/agent/settings.json`, or run `ypi --isolated` to disable global Pi extensions and load only `ypi`.
+
+### Or install as a Pi package
+
 ```bash
 pi install git:github.com/1yian/ypi
 ```

@@ -7,6 +7,9 @@
   "keywords": [
     "pi-package"
   ],
+  "bin": {
+    "ypi": "./src/bin.ts"
+  },
   "pi": {
     "extensions": [
       "./node_modules/pi-tiers/src/index.ts",
