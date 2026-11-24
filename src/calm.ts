@@ -39,7 +39,6 @@ export default function ypiCalm(pi: ExtensionAPI): void {
         return Promise.resolve();
       }
       apply(ctx.hasUI ? ctx.ui : undefined, next);
-      ctx.ui.notify(next ? "Calm mode on" : "Calm mode off", "info");
       return Promise.resolve();
     },
   });

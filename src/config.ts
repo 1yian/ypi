@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 
-const DEFAULT_FOLD_TOKENS = 150_000;
+const DEFAULT_FOLD_TOKENS = 256_000;
 const DEFAULT_COMPACTOR_PROVIDER = "tier";
 const DEFAULT_COMPACTOR_MODEL = "compact";
 

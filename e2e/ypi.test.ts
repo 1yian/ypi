@@ -43,12 +43,20 @@ type EditorFactoryFn = NonNullable<Parameters<ExtensionUIContext["setEditorCompo
 const noop = () => undefined;
 const identity = (text: string) => text;
 
-function isRenderableComponent(value: unknown): value is Component {
+interface InteractiveEditorComponent extends Component {
+  readonly getText: () => string;
+  readonly setText: (text: string) => void;
+  readonly handleInput: (data: string) => void;
+}
+
+function isInteractiveEditor(value: unknown): value is InteractiveEditorComponent {
   return (
     typeof value === "object" &&
     value !== null &&
-    "render" in value &&
-    typeof Reflect.get(value, "render") === "function"
+    typeof Reflect.get(value, "render") === "function" &&
+    typeof Reflect.get(value, "getText") === "function" &&
+    typeof Reflect.get(value, "setText") === "function" &&
+    typeof Reflect.get(value, "handleInput") === "function"
   );
 }
 
@@ -494,10 +502,33 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
       modelRegistry,
     );
 
+    const sentMessages: {
+      readonly customType: string;
+      readonly content: unknown;
+      readonly display: boolean;
+      readonly triggerTurn: boolean | undefined;
+    }[] = [];
+    const sentUserMessages: string[] = [];
+    let isIdleState = true;
+    let queuedSteerText: string | undefined;
+    let abortCount = 0;
+    const editorHolder: { current: InteractiveEditorComponent | undefined } = {
+      current: undefined,
+    };
+
     runner.bindCore(
       {
-        sendMessage: noop,
-        sendUserMessage: noop,
+        sendMessage(message, options) {
+          sentMessages.push({
+            customType: message.customType,
+            content: message.content,
+            display: message.display,
+            triggerTurn: options?.triggerTurn,
+          });
+        },
+        sendUserMessage(content) {
+          sentUserMessages.push(typeof content === "string" ? content : JSON.stringify(content));
+        },
         appendEntry: noop,
         setSessionName: noop,
         getSessionName: () => undefined,
@@ -515,12 +546,18 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
       {
         getModel: () => undefined,
         getScopedModels: () => [],
-        isIdle: () => true,
+        isIdle: () => isIdleState,
         isProjectTrusted: () => true,
         getSignal: () => undefined,
-        abort: noop,
+        abort() {
+          abortCount += 1;
+          if (queuedSteerText !== undefined && editorHolder.current !== undefined) {
+            editorHolder.current.setText(queuedSteerText);
+            queuedSteerText = undefined;
+          }
+        },
         shutdown: noop,
-        hasPendingMessages: () => false,
+        hasPendingMessages: () => queuedSteerText !== undefined,
         getContextUsage: () => undefined,
         compact: noop,
         getSystemPrompt: () => "",
@@ -581,6 +618,11 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
     assert.ok(calmCommand !== undefined);
     await calmCommand.handler("on", runner.createCommandContext());
 
+    assert.deepEqual(
+      captured.notifications,
+      [],
+      "/calm toggle must not spam chat with notifications",
+    );
     assert.equal(captured.hiddenThinkingLabel, "");
     assert.deepEqual(
       toolRow.render(80),
@@ -607,7 +649,8 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
       editorTheme,
       new TuiKeybindingsManager(TUI_KEYBINDINGS),
     ]);
-    assert.ok(isRenderableComponent(editorRaw), "expected editor component");
+    assert.ok(isInteractiveEditor(editorRaw), "expected interactive editor component");
+    editorHolder.current = editorRaw;
 
     const idleCalmLines = editorRaw.render(90).map((line) => stripTerminalSequences(line));
     const topIdle = idleCalmLines[0] ?? "";
@@ -619,11 +662,39 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
     assert.ok(!bodyIdle.includes("┃"), "editor rail must match thin ╭/╰ corners with │");
     assert.ok(bottomIdle.includes("╰"));
 
+    editorRaw.setText(".");
+    editorRaw.handleInput("\r");
+    assert.equal(editorRaw.getText(), "", "'.' shortcut clears editor");
+    assert.equal(sentMessages.length, 1, "'.' sends hidden continue message when idle");
+    assert.equal(sentMessages[0]?.customType, "ypi-continue");
+    assert.equal(sentMessages[0]?.display, false);
+    assert.equal(sentMessages[0]?.triggerTurn, true);
+
+    isIdleState = false;
     await runner.emit({ type: "agent_start" });
     const thinkingTop = stripTerminalSequences(editorRaw.render(90)[0] ?? "");
     assert.ok(thinkingTop.includes("thinking"));
     assert.ok(thinkingTop.includes("☾ calm"));
 
+    queuedSteerText = "stop and do this instead";
+    const queuedBottom = stripTerminalSequences(editorRaw.render(90).at(-1) ?? "");
+    assert.ok(
+      queuedBottom.includes("enter interrupt & send"),
+      "bottom border hints double-enter interrupt when a message is queued",
+    );
+
+    editorRaw.setText("");
+    editorRaw.handleInput("\r");
+    assert.equal(abortCount, 1, "second enter while streaming with queued prompt aborts turn");
+    assert.equal(editorRaw.getText(), "", "editor stays clear while waiting for turn settle");
+    assert.equal(sentUserMessages.length, 0, "waits for agent_settled before sending");
+
+    isIdleState = true;
+    await runner.emit({ type: "agent_settled", aborted: true });
+    assert.deepEqual(sentUserMessages, ["stop and do this instead"]);
+
+    isIdleState = false;
+    await runner.emit({ type: "agent_start" });
     await runner.emit({
       type: "tool_execution_start",
       toolCallId: "tc-2",
@@ -638,6 +709,10 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
     assert.ok(compactTop.includes("compacting · 24k"));
     eventBus.emit(OPTCHAT_COMPACTING_EVENT, { active: false });
 
+    editorRaw.setText(".");
+    editorRaw.handleInput("\r");
+    assert.equal(abortCount, 2, "'.' while streaming aborts current turn before continuing");
+
     await runner.emit({
       type: "tool_execution_end",
       toolCallId: "tc-2",
@@ -645,9 +720,12 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
       result: { content: [{ type: "text", text: "" }], details: undefined },
       isError: false,
     });
-    await runner.emit({ type: "agent_settled", aborted: false });
+    isIdleState = true;
+    await runner.emit({ type: "agent_settled", aborted: true });
+    assert.equal(sentMessages.length, 2, "'.' sends hidden continue once aborted turn settles");
 
     await calmCommand.handler("off", runner.createCommandContext());
+    assert.deepEqual(captured.notifications, [], "/calm off also stays quiet");
     assert.equal(captured.hiddenThinkingLabel, undefined);
     const restoredToolLines = toolRow.render(80).map((line) => stripTerminalSequences(line));
     assert.ok(restoredToolLines.length > 0, "tool row must reappear when calm mode turns off");
@@ -837,7 +915,7 @@ void test("Pi OptChat extension disables subagents, inspector bar, and noisy sta
   }
 });
 
-void test("loadOptChatConfig defaults OptChat on with tier/compact at 150k fold tokens and supports overrides and opt-out", () => {
+void test("loadOptChatConfig defaults OptChat on with tier/compact at 256k fold tokens and supports overrides and opt-out", () => {
   const dir = join(tmpdir(), `ypi-e2e-${Date.now()}`);
   const agentDir = join(dir, "agent");
   mkdirSync(agentDir, { recursive: true });
@@ -848,7 +926,7 @@ void test("loadOptChatConfig defaults OptChat on with tier/compact at 150k fold 
     assert.equal(defaults.compactorProvider, "tier");
     assert.equal(defaults.compactorModel, "compact");
     assert.equal(defaults.thinking, "low");
-    assert.equal(defaults.foldTokens, 150_000);
+    assert.equal(defaults.foldTokens, 256_000);
     assert.equal(defaults.foldOnCacheExpiry, true);
 
     assert.equal(

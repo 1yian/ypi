@@ -401,9 +401,15 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
     const last = ctx.sessionManager.getBranch().filter(e => e.type === 'message' && e.message.role === 'assistant' && e.message.stopReason !== 'error' && e.message.stopReason !== 'aborted').at(-1);
     return last?.type === 'message' && last.message.role === 'assistant' ? ctx.modelRegistry.find(last.message.provider, last.message.model) : undefined;
   };
+  const effectiveFoldTokens = (ctx: ExtensionContext): number | undefined => {
+    const fold = capabilities.foldTokens;
+    if (fold === undefined) return undefined;
+    const contextWindow = ctx.model?.contextWindow ?? cachedModel(ctx)?.contextWindow;
+    return contextWindow !== undefined && contextWindow > 0 ? Math.min(fold, contextWindow) : fold;
+  };
   const startRun = (ctx: ExtensionContext) => {
     flush(); keep = 0; runStarted = true;
-    const fold = capabilities.foldTokens;
+    const fold = effectiveFoldTokens(ctx);
     const limit = fold === undefined ? undefined : capabilities.foldAfterIdle?.(cachedModel(ctx));
     const cold = limit !== undefined && cacheIdleMs(ctx) >= limit;
     if (fold === undefined || view === undefined || cold || (view.length + chars(run) + capped) / 4 >= fold) { run = []; capped = 0; logged = 0; view = undefined; }
@@ -498,7 +504,11 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
       const current = ctx.getSystemPrompt();
       if (current.startsWith(MASTER.slice(0, 40))) prompt = current;
       // A turn past its budget moves its steps into the view, keeping the task and the last tool call whole (#146).
-      const refresh = refreshPoint(run, keep, refreshBudget(ctx.model?.contextWindow, capabilities.foldTokens === undefined ? refreshFraction(a.config.refreshAt) : 0));
+      const foldLimit = effectiveFoldTokens(ctx);
+      const turnBudget = foldLimit !== undefined
+        ? Math.max(0, foldLimit * 4 - view.length)
+        : refreshBudget(ctx.model?.contextWindow, refreshFraction(a.config.refreshAt));
+      const refresh = refreshPoint(run, keep, turnBudget);
       if (refresh) {
         const { cut, size } = refresh, began = Date.now();
         const detail = `${Math.round(size / 4000)}k`;

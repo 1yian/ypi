@@ -140,15 +140,14 @@ export default async function ypiOptChat(pi: ExtensionAPI): Promise<void> {
     ]);
   });
 
+  const transientCustomTypes = [...new Set([...config.transientCustomTypes, "ypi-continue"])];
   const capabilities: OptChatCapabilities = {
     connectedWindows: false,
     subagents: false,
     ...(config.viewBudget !== undefined ? { viewBudget: config.viewBudget } : {}),
     ...(config.foldTokens !== undefined ? { foldTokens: config.foldTokens } : {}),
     ...(config.foldOnCacheExpiry ? { foldAfterIdle: cacheLifetimeMs } : {}),
-    ...(config.transientCustomTypes.length > 0
-      ? { transientCustomTypes: config.transientCustomTypes }
-      : {}),
+    transientCustomTypes,
   };
   await Promise.resolve(callExport(optchatRaw, "default", optchatUrl, [pi, capabilities]));
 

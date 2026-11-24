@@ -79,9 +79,25 @@ interface YpiEditorCallbacks {
   readonly isCalmActive: () => boolean;
   readonly getActivitySnapshot: () => ActivitySnapshot;
   readonly getAnimationTick: () => number;
+  readonly canInterruptAndSend: () => boolean;
+  readonly onInterruptAndSend: (readEditorText: () => string, clearEditor: () => void) => boolean;
+  readonly onContinueShortcut: () => void;
   readonly onCompactCommand: () => boolean;
   readonly onExportCommand: () => void;
 }
+
+const CONTINUE_MESSAGE_TYPE = "ypi-continue";
+const MANUAL_CONTINUE_PROMPT = `<system-notice>
+Continue.
+
+MUST resume most recent intent; complete unfinished work.
+If interrupted mid-step: resume where stopped.
+NEVER pause to summarize progress, re-confirm plan, or ask whether to proceed; continue.
+</system-notice>`;
+
+type PendingInterruptAction =
+  | { readonly kind: "user"; readonly text: string }
+  | { readonly kind: "continue" };
 
 const FAST_MODE_KEY = "codex-fast-mode";
 const TIERS_KEY = "pi-tiers";
@@ -552,6 +568,20 @@ class YpiEditor extends CustomEditor {
   public override handleInput(data: string): void {
     if (this.kb.matches(data, "tui.input.submit") && !this.disableSubmit) {
       const trimmed = this.getText().trim();
+      if (trimmed === "" && this.callbacks.canInterruptAndSend()) {
+        const handled = this.callbacks.onInterruptAndSend(
+          () => this.getText(),
+          () => {
+            this.setText("");
+          },
+        );
+        if (handled) return;
+      }
+      if (trimmed === ".") {
+        this.setText("");
+        this.callbacks.onContinueShortcut();
+        return;
+      }
       if (trimmed === "/share" || trimmed === "/export" || trimmed.startsWith("/export ")) {
         this.callbacks.onExportCommand();
       }
@@ -619,6 +649,8 @@ class YpiEditor extends CustomEditor {
       rightTag = ` ${theme.fg("muted", `↓ ${hiddenLineCount} more`)} `;
     } else if (this.isBashDraft()) {
       rightTag = ` ${theme.fg("bashMode", "! bash")} `;
+    } else if (this.getText().length === 0 && this.callbacks.canInterruptAndSend() && width >= 44) {
+      rightTag = ` ${theme.fg("accent", "enter interrupt & send")} `;
     } else if (this.getText().length === 0 && width >= 52) {
       rightTag = ` ${theme.fg("dim", "enter send · shift+enter newline")} `;
     }
@@ -685,7 +717,27 @@ export default function ypiTui(pi: ExtensionAPI): void {
   let animationTick = 0;
   let ticker: ReturnType<typeof setInterval> | undefined;
   let tickerIntervalMs = 0;
+  const queuedPrompts: string[] = [];
+  let pendingInterruptAction: PendingInterruptAction | undefined;
   const toolRows = new Map<object, () => void>();
+
+  const flushPendingInterruptAction = (): void => {
+    const action = pendingInterruptAction;
+    if (action === undefined) return;
+    pendingInterruptAction = undefined;
+    if (action.kind === "continue") {
+      pi.sendMessage(
+        {
+          customType: CONTINUE_MESSAGE_TYPE,
+          content: MANUAL_CONTINUE_PROMPT,
+          display: false,
+        },
+        { triggerTurn: true },
+      );
+      return;
+    }
+    pi.sendUserMessage(action.text);
+  };
 
   const requestAllRender = (): void => {
     requestEditorRender?.();
@@ -890,6 +942,40 @@ export default function ypiTui(pi: ExtensionAPI): void {
         isCalmActive: () => calmActive,
         getActivitySnapshot: () => activity.snapshot(),
         getAnimationTick: () => animationTick,
+        canInterruptAndSend: () => !ctx.isIdle() && ctx.hasPendingMessages(),
+        onInterruptAndSend: (readEditorText, clearEditor) => {
+          if (ctx.isIdle() || !ctx.hasPendingMessages()) return false;
+          ctx.abort();
+          const restored = readEditorText().trim();
+          if (restored.length > 0) clearEditor();
+          const promptText = restored.length > 0 ? restored : queuedPrompts.join("\n\n").trim();
+          queuedPrompts.length = 0;
+          if (promptText.length === 0) return false;
+          pendingInterruptAction = { kind: "user", text: promptText };
+          if (ctx.isIdle()) {
+            queueMicrotask(flushPendingInterruptAction);
+          }
+          requestEditorRender?.();
+          return true;
+        },
+        onContinueShortcut: () => {
+          if (ctx.isIdle()) {
+            pi.sendMessage(
+              {
+                customType: CONTINUE_MESSAGE_TYPE,
+                content: MANUAL_CONTINUE_PROMPT,
+                display: false,
+              },
+              { triggerTurn: true },
+            );
+            return;
+          }
+          pendingInterruptAction = { kind: "continue" };
+          ctx.abort();
+          if (ctx.isIdle()) {
+            queueMicrotask(flushPendingInterruptAction);
+          }
+        },
         onCompactCommand: () => {
           if (!optchatActive) return false;
           pi.events.emit("ypi:optchat-fold", { ctx });
@@ -1052,6 +1138,8 @@ export default function ypiTui(pi: ExtensionAPI): void {
 
   pi.on("session_start", (_event, ctx) => {
     toolRows.clear();
+    queuedPrompts.length = 0;
+    pendingInterruptAction = undefined;
     exportWindow = false;
     calmActive = loadCalmPreference();
     activity.reset();
@@ -1061,6 +1149,14 @@ export default function ypiTui(pi: ExtensionAPI): void {
     installHeader(ctx);
     installEditor(ctx);
     installFooter(ctx);
+  });
+
+  pi.on("input", (event) => {
+    if (event.streamingBehavior !== undefined && event.text.trim().length > 0) {
+      queuedPrompts.push(event.text);
+      requestEditorRender?.();
+    }
+    return undefined;
   });
 
   pi.on("agent_start", () => {
@@ -1104,8 +1200,10 @@ export default function ypiTui(pi: ExtensionAPI): void {
 
   pi.on("agent_settled", () => {
     speed = undefined;
+    queuedPrompts.length = 0;
     activity.settleAgent();
     requestFooterRender?.();
+    flushPendingInterruptAction();
   });
 
   pi.on("session_before_compact", () => {
@@ -1142,5 +1240,7 @@ export default function ypiTui(pi: ExtensionAPI): void {
     activity.reset();
     stopTicker();
     toolRows.clear();
+    queuedPrompts.length = 0;
+    pendingInterruptAction = undefined;
   });
 }

@@ -59,7 +59,7 @@ Copy `templates/tiers.example.json` to `~/.pi/agent/tiers.json` and edit the pro
 OptChat fold-mode memory is **on by default** in `ypi`:
 
 - **Default compactor:** `tier/compact` (`thinking: "low"`), falling back cleanly to the session's active model if no `compact` tier is configured.
-- **Auto-fold:** keeps prompt caches warm across turns and auto-folds at **150k tokens** or when the prompt cache expires (`foldOnCacheExpiry: true`).
+- **Auto-fold:** keeps prompt caches warm across turns and auto-folds at **256k tokens or the model's context limit, whichever is lower**, or when the prompt cache expires (`foldOnCacheExpiry: true`).
 - **Immediate `/compact`:** running `/compact` immediately flushes and settles the current conversation into OptChat's zoomable memory tree using the configured compactor and resets the active prompt window.
 - **Zero lock collisions:** each session automatically binds to its own session-scoped OptChat profile under `~/.pi/agent/ypi/optchat/profiles/` (persisted across `ypi -c` / `ypi -r`, cleaned up on exit for `--no-session`).
 - **Memory-only (no subagent chrome):** OptChat's background subagents (`spawn` / `tell` / `models`), below-editor Agents/Usage/Activity inspector bar, and `f6` shortcut are disabled in `ypi` so you only get fold-mode memory (`zoom`, `date`, `/compact`, `/fold`).
@@ -75,7 +75,7 @@ To pin a persistent named profile (for example, a long-lived assistant) or custo
   "compactorModel": "compact",
   "thinking": "low",
   "mode": "fold",
-  "foldTokens": 150000,
+  "foldTokens": 256000,
   "foldOnCacheExpiry": true
 }
 ```
@@ -88,7 +88,12 @@ Run `/calm` inside Pi to toggle zen focus mode (persisted to `~/.pi/agent/ypi-ca
 
 - Hides all tool execution rows (including expanded views, while keeping everything in LLM context and `/export`) and hides collapsed thinking labels.
 - Shifts the composer rail and OpenCode-style top-rail luminous scanner to a slower, softer twilight breath with a right-aligned `☾ calm` indicator that never clips at any width.
-- Toggle back anytime with `/calm` (or `/calm off`) to immediately reveal every tool row in the transcript.
+- Toggle back anytime with `/calm` (or `/calm off`) quietly (no chat spam) to immediately reveal every tool row in the transcript.
+
+## Composer shortcuts
+
+- **Double-Enter while streaming:** first Enter queues a steering message; pressing Enter again on the empty editor interrupts the running turn and sends your queued message immediately.
+- **`.` + Enter:** sends a hidden continuation nudge (no visible chat message) to get the agent to continue or respond; interrupts first if streaming.
 
 ## Development
 
