@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   createEventBus,
   discoverAndLoadExtensions,
@@ -224,6 +225,7 @@ interface CapturedUiState {
   readonly statuses: Map<string, string | undefined>;
   readonly widgets: Map<string, unknown>;
   readonly titles: string[];
+  readonly terminalInputHandlers?: ((data: string) => unknown)[];
 }
 
 function createTestUiContext(theme: Theme, captured: CapturedUiState): ExtensionUIContext {
@@ -236,7 +238,13 @@ function createTestUiContext(theme: Theme, captured: CapturedUiState): Extension
     notify(message: string) {
       captured.notifications.push(message);
     },
-    onTerminalInput: () => noop,
+    onTerminalInput(handler) {
+      captured.terminalInputHandlers?.push(handler);
+      return () => {
+        const idx = captured.terminalInputHandlers?.indexOf(handler) ?? -1;
+        if (idx >= 0) captured.terminalInputHandlers?.splice(idx, 1);
+      };
+    },
     setStatus(key: string, text: string | undefined) {
       captured.statuses.set(key, text);
     },
@@ -1073,6 +1081,16 @@ void test("buildPiLaunchPlan wires bundled extensions, avoids duplicates, and re
     assert.ok(isolated.args.some((arg) => arg.endsWith("pi-tiers/src/index.ts")));
     assert.ok(!isolated.args.includes("--isolated"));
 
+    const autoExitPlan = buildPiLaunchPlan(["--auto-exit=1500", "do task"], {
+      packageRoot: ROOT,
+      cwd: dir,
+      env: { PI_CODING_AGENT_DIR: agentDir },
+    });
+    assert.equal(autoExitPlan.kind, "exec");
+    assert.equal(autoExitPlan.env?.["YPI_AUTO_EXIT"], "1500");
+    assert.ok(!autoExitPlan.args.includes("--auto-exit=1500"));
+    assert.equal(autoExitPlan.args.at(-1), "do task");
+
     const passthrough = buildPiLaunchPlan(["auth", "status"], {
       packageRoot: ROOT,
       cwd: dir,
@@ -1087,6 +1105,158 @@ void test("buildPiLaunchPlan wires bundled extensions, avoids duplicates, and re
     });
     assert.equal(help.kind, "help");
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+void test("YPI_AUTO_EXIT shuts down unattended interactive turns and cancels on operator intervention", async () => {
+  const dir = join(tmpdir(), `ypi-auto-exit-e2e-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const prevAutoExit = process.env["YPI_AUTO_EXIT"];
+  const prevAutoExitMs = process.env["YPI_AUTO_EXIT_MS"];
+  const prevCalmFile = process.env["YPI_CALM_FILE"];
+  process.env["YPI_AUTO_EXIT"] = "1";
+  process.env["YPI_AUTO_EXIT_MS"] = "60";
+  process.env["YPI_CALM_FILE"] = join(dir, "calm");
+
+  try {
+    const theme = buildThemeFromJson(resolve(ROOT, "themes/ypi.json"));
+    const loaded = await discoverAndLoadExtensions(
+      [resolve(ROOT, "src/tui.ts")],
+      dir,
+      join(dir, "agent"),
+      createEventBus(),
+    );
+    assert.deepEqual(loaded.errors, []);
+
+    const modelRuntime = await ModelRuntime.create({
+      refreshOnCreate: false,
+      allowModelNetwork: false,
+      modelsPath: null,
+    });
+    const modelRegistry = new ModelRegistry(modelRuntime);
+    const sessionManager = SessionManager.inMemory(dir);
+    const runner = new ExtensionRunner(
+      loaded.extensions,
+      loaded.runtime,
+      dir,
+      sessionManager,
+      modelRegistry,
+    );
+
+    const state = { isIdle: true, shutdowns: 0 };
+    runner.bindCore(
+      {
+        sendMessage: noop,
+        sendUserMessage: noop,
+        appendEntry: noop,
+        setSessionName: noop,
+        getSessionName: () => undefined,
+        setLabel: noop,
+        getActiveTools: () => [],
+        getAllTools: () => [],
+        setActiveTools: noop,
+        refreshTools: noop,
+        getCommands: () => [],
+        setModel: () => Promise.resolve(false),
+        getThinkingLevel: () => "medium",
+        setThinkingLevel: noop,
+        getSettings: () => ({}),
+      },
+      {
+        getModel: () => undefined,
+        getScopedModels: () => [],
+        isIdle: () => state.isIdle,
+        isProjectTrusted: () => true,
+        getSignal: () => undefined,
+        abort: noop,
+        shutdown() {
+          state.shutdowns += 1;
+        },
+        hasPendingMessages: () => false,
+        getContextUsage: () => undefined,
+        compact: noop,
+        getSystemPrompt: () => "",
+        getSystemPromptOptions: () => ({
+          selectedTools: [],
+          cwd: dir,
+          contextFiles: [],
+          skills: [],
+        }),
+        executeTool: () => Promise.reject(new Error("not used")),
+        getCallableTools: () => [],
+      },
+    );
+
+    const captured: CapturedUiState = {
+      workingVisible: undefined,
+      hiddenThinkingLabel: undefined,
+      editorFactory: undefined,
+      notifications: [],
+      statuses: new Map(),
+      widgets: new Map(),
+      titles: [],
+      terminalInputHandlers: [],
+    };
+    const uiCtx = createTestUiContext(theme, captured);
+    runner.setUIContext(uiCtx, "tui");
+
+    await runner.emit({ type: "session_start", reason: "startup" });
+
+    state.isIdle = false;
+    await runner.emit({ type: "agent_start" });
+    state.isIdle = true;
+    await runner.emit({ type: "agent_settled", aborted: true });
+    await delay(90);
+    assert.equal(state.shutdowns, 0, "aborted turn must not trigger auto-exit");
+
+    uiCtx.setEditorText("wait check one more thing");
+    state.isIdle = false;
+    await runner.emit({ type: "agent_start" });
+    state.isIdle = true;
+    await runner.emit({ type: "agent_settled", aborted: false });
+    await delay(90);
+    assert.equal(state.shutdowns, 0, "non-empty editor draft must not trigger auto-exit");
+    uiCtx.setEditorText("");
+
+    state.isIdle = false;
+    await runner.emit({ type: "agent_start" });
+    state.isIdle = true;
+    await runner.emit({ type: "agent_settled", aborted: false });
+    assert.ok(
+      (captured.statuses.get("ypi-auto-exit") ?? "").includes("exiting"),
+      "countdown status should show during grace window",
+    );
+    for (const handler of captured.terminalInputHandlers ?? []) {
+      handler(" ");
+    }
+    await delay(90);
+    assert.equal(state.shutdowns, 0, "pressing a key during grace window must cancel auto-exit");
+    assert.equal(captured.statuses.get("ypi-auto-exit"), undefined);
+
+    state.isIdle = false;
+    await runner.emit({ type: "agent_start" });
+    state.isIdle = true;
+    await runner.emit({ type: "agent_settled", aborted: false });
+    for (const handler of captured.terminalInputHandlers ?? []) {
+      handler("\u001B[O");
+      handler("\u001B[<35;10;10M");
+    }
+    await delay(90);
+    assert.equal(
+      state.shutdowns,
+      1,
+      "unattended turn must auto-exit cleanly despite focus/mouse ANSI events",
+    );
+
+    await runner.emit({ type: "session_shutdown", reason: "quit" });
+  } finally {
+    if (prevAutoExit === undefined) delete process.env["YPI_AUTO_EXIT"];
+    else process.env["YPI_AUTO_EXIT"] = prevAutoExit;
+    if (prevAutoExitMs === undefined) delete process.env["YPI_AUTO_EXIT_MS"];
+    else process.env["YPI_AUTO_EXIT_MS"] = prevAutoExitMs;
+    if (prevCalmFile === undefined) delete process.env["YPI_CALM_FILE"];
+    else process.env["YPI_CALM_FILE"] = prevCalmFile;
     rmSync(dir, { recursive: true, force: true });
   }
 });

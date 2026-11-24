@@ -11,7 +11,7 @@ if (plan.kind === "help") {
 
 const child = spawn(plan.piBin, [...plan.args], {
   stdio: "inherit",
-  env: process.env,
+  env: plan.env !== undefined ? { ...process.env, ...plan.env } : process.env,
 });
 
 process.on("SIGINT", () => undefined);

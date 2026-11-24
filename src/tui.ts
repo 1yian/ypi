@@ -27,6 +27,7 @@ import {
   phaseRailToken,
   renderActivityBorder,
 } from "./activity-renderer.ts";
+import { createAutoExitController } from "./auto-exit.ts";
 import { CALM_EVENT, LEGACY_CALM_EVENT, loadCalmPreference, parseCalmEvent } from "./calm-state.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
@@ -735,9 +736,9 @@ export default function ypiTui(pi: ExtensionAPI): void {
   let pendingInterruptAction: PendingInterruptAction | undefined;
   const toolRows = new Map<object, () => void>();
 
-  const flushPendingInterruptAction = (): void => {
+  const flushPendingInterruptAction = (): boolean => {
     const action = pendingInterruptAction;
-    if (action === undefined) return;
+    if (action === undefined) return false;
     pendingInterruptAction = undefined;
     if (action.kind === "continue") {
       pi.sendMessage(
@@ -748,9 +749,10 @@ export default function ypiTui(pi: ExtensionAPI): void {
         },
         { triggerTurn: true },
       );
-      return;
+      return true;
     }
     pi.sendUserMessage(action.text);
+    return true;
   };
 
   const requestAllRender = (): void => {
@@ -977,7 +979,9 @@ export default function ypiTui(pi: ExtensionAPI): void {
           if (promptText.length === 0) return false;
           pendingInterruptAction = { kind: "user", text: promptText };
           if (ctx.isIdle()) {
-            queueMicrotask(flushPendingInterruptAction);
+            queueMicrotask(() => {
+              flushPendingInterruptAction();
+            });
           }
           requestEditorRender?.();
           return true;
@@ -997,7 +1001,9 @@ export default function ypiTui(pi: ExtensionAPI): void {
           pendingInterruptAction = { kind: "continue" };
           ctx.abort();
           if (ctx.isIdle()) {
-            queueMicrotask(flushPendingInterruptAction);
+            queueMicrotask(() => {
+              flushPendingInterruptAction();
+            });
           }
         },
         onCompactCommand: () => {
@@ -1160,6 +1166,8 @@ export default function ypiTui(pi: ExtensionAPI): void {
     });
   }
 
+  const autoExit = createAutoExitController();
+
   pi.on("session_start", (_event, ctx) => {
     toolRows.clear();
     queuedPrompts.length = 0;
@@ -1168,6 +1176,7 @@ export default function ypiTui(pi: ExtensionAPI): void {
     calmActive = loadCalmPreference();
     activity.reset();
     stopTicker();
+    autoExit.onSessionStart(ctx);
     if (ctx.mode !== "tui" || !ctx.hasUI) return;
     ctx.ui.setWorkingVisible(false);
     installHeader(ctx);
@@ -1176,6 +1185,7 @@ export default function ypiTui(pi: ExtensionAPI): void {
   });
 
   pi.on("input", (event) => {
+    autoExit.onInput();
     if (event.streamingBehavior !== undefined && event.text.trim().length > 0) {
       queuedPrompts.push(event.text);
       requestEditorRender?.();
@@ -1184,6 +1194,7 @@ export default function ypiTui(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_start", () => {
+    autoExit.onAgentStart();
     activity.startAgent();
   });
 
@@ -1222,12 +1233,13 @@ export default function ypiTui(pi: ExtensionAPI): void {
     activity.endTool(event.toolCallId);
   });
 
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (event, ctx) => {
     speed = undefined;
     queuedPrompts.length = 0;
     activity.settleAgent();
     requestFooterRender?.();
-    flushPendingInterruptAction();
+    const dispatched = flushPendingInterruptAction();
+    autoExit.onAgentSettled(event, ctx, dispatched);
   });
 
   pi.on("session_before_compact", () => {
@@ -1261,6 +1273,7 @@ export default function ypiTui(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", () => {
+    autoExit.onSessionShutdown();
     activity.reset();
     stopTicker();
     toolRows.clear();

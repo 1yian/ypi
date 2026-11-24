@@ -18,6 +18,7 @@ export interface LaunchPlan {
   readonly kind: "help" | "exec";
   readonly piBin: string;
   readonly args: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 const PASSTHROUGH_SUBCOMMANDS = new Set([
@@ -103,10 +104,12 @@ function hasFlag(argv: readonly string[], names: readonly string[]): boolean {
 function stripYpiFlags(argv: readonly string[]): {
   readonly isolated: boolean;
   readonly showYpiHelp: boolean;
+  readonly autoExit: string | undefined;
   readonly rest: readonly string[];
 } {
   let isolated = false;
   let showYpiHelp = false;
+  let autoExit: string | undefined;
   const rest: string[] = [];
   let afterDoubleDash = false;
   for (const arg of argv) {
@@ -123,9 +126,17 @@ function stripYpiFlags(argv: readonly string[]): {
       showYpiHelp = true;
       continue;
     }
+    if (!afterDoubleDash && arg === "--auto-exit") {
+      autoExit = "1";
+      continue;
+    }
+    if (!afterDoubleDash && arg.startsWith("--auto-exit=")) {
+      autoExit = arg.slice("--auto-exit=".length) || "1";
+      continue;
+    }
     rest.push(arg);
   }
-  return { isolated, showYpiHelp, rest };
+  return { isolated, showYpiHelp, autoExit, rest };
 }
 
 export function formatYpiHelp(): string {
@@ -137,11 +148,14 @@ export function formatYpiHelp(): string {
     "",
     "ypi options:",
     "  --isolated          Disable global Pi extensions and load only ypi's bundle",
+    "  --auto-exit[=MS]    Exit cleanly after an unattended interactive turn settles",
     "  --ypi-help          Show this help (use --help for full Pi CLI help)",
     "",
     "Environment:",
     "  YPI_THEME           Initial theme override (default: ypi, or ypi-light/ypi)",
     "  YPI_ISOLATED=1      Same as --isolated",
+    "  YPI_AUTO_EXIT=1     Auto-exit interactive session when idle (any key cancels)",
+    "  YPI_AUTO_EXIT_MS    Grace window in ms before auto-exit (default: 2500)",
     "  YPI_PI_BIN          Path to pi executable (default: pi)",
     "  YPI_OPTCHAT=0       Disable OptChat memory (on by default)",
     "  YPI_OPTCHAT_CONFIG  Explicit path to optchat.json",
@@ -197,7 +211,7 @@ export function buildPiLaunchPlan(
   const packageRoot = options.packageRoot ?? resolve(import.meta.dirname, "..");
   const cwd = options.cwd ?? process.cwd();
 
-  const { isolated: isolatedFlag, showYpiHelp, rest } = stripYpiFlags(argv);
+  const { isolated: isolatedFlag, showYpiHelp, autoExit, rest } = stripYpiFlags(argv);
   if (showYpiHelp) {
     return { kind: "help", piBin, args: [] };
   }
@@ -231,5 +245,6 @@ export function buildPiLaunchPlan(
     kind: "exec",
     piBin,
     args: [...injected, ...rest],
+    ...(autoExit !== undefined ? { env: { YPI_AUTO_EXIT: autoExit } } : {}),
   };
 }

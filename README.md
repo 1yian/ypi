@@ -90,10 +90,11 @@ Run `/calm` inside Pi to toggle zen focus mode (persisted to `~/.pi/agent/ypi-ca
 - Shifts the composer rail and OpenCode-style top-rail luminous scanner to a slower, softer twilight breath with a right-aligned `☾ calm` indicator that never clips at any width.
 - Toggle back anytime with `/calm` (or `/calm off`) quietly (no chat spam) to immediately reveal every tool row in the transcript.
 
-## Composer shortcuts
+## Composer shortcuts & worker mode
 
 - **Double-Enter while streaming:** first Enter queues a steering message; pressing Enter again on the empty editor interrupts the running turn and sends your queued message immediately.
 - **`.` + Enter:** sends a hidden continuation nudge (no visible chat message) to get the agent to continue or respond; interrupts first if streaming.
+- **`--auto-exit` / `YPI_AUTO_EXIT=1`:** for interactive worker panes (e.g. `fleet-runner` in Herdr) that should exit cleanly once an unattended turn settles. Shows a brief countdown (`YPI_AUTO_EXIT_MS`, default 2500ms); pressing any key, having draft text, or aborting cancels auto-exit so an operator can steer interactively without losing the pane.
 
 ## Development
 
