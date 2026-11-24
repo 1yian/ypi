@@ -81,7 +81,7 @@
   },
   "overrides": [
     {
-      "files": ["src/optchat.ts"],
+      "files": ["src/optchat.ts", "src/tui.ts", "src/calm.ts"],
       "rules": {
         "import/no-default-export": "off"
       }

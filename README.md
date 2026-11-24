@@ -1,11 +1,16 @@
 # ypi
 
-A user-agnostic, provider-agnostic Pi harness package bundling four extensions in one install:
+A user-agnostic, provider-agnostic [Pi](https://pi.dev) harness bundle packaging:
 
-- [`pi-tiers`](https://github.com/1yian/pi-tiers) - model tier routing, fallback chains, cooldowns, and directory/remote provider rules.
-- [`pi-web-access`](https://www.npmjs.com/package/pi-web-access) - web search, page fetching, and content extraction.
-- [`@ff-labs/pi-fff`](https://www.npmjs.com/package/@ff-labs/pi-fff) - fast git-aware fuzzy file search and grep.
-- **OptChat (fold mode)** - conversation memory with a configurable compactor provider/model/tier and router-aware prompt cache marks (based on MIT-licensed `pi-optchat` 0.9.0).
+- **`pi-tiers`** (`github:1yian/pi-tiers`) - model tier routing, fallback chains, cooldown rotation, and provider policies.
+- **`pi-web-access`** - web search and content fetching.
+- **`@ff-labs/pi-fff`** - fast git-aware fuzzy file finder and grep.
+- **OptChat (`src/optchat.ts`)** - fold-mode session memory (`pi-optchat` 0.9.0 with fold-mode compaction and router-aware prompt cache marks) with a configurable compactor model or tier.
+- **`ypi` + `ypi-light` themes (`themes/`)** - obsidian-ink dark palette with electric mint, soft violet, sky blue, amber, and coral accents designed to look sharp both in `herdr` and default terminals, plus a matching light theme for automatic light/dark switching.
+- **Refined TUI (`src/tui.ts`)** - OpenCode / OMP-inspired left-rail composer, compact startup header, single-line collapsed tool rows (expandable with `ctrl+o` or click), pulsing working indicator, and responsive 2-row telemetry footer with `pi-tiers` route display, visual context bar, token totals, cache rate, cost, and live `tok/s`.
+- **Calm Mode (`src/calm.ts`)** - `/calm` toggle (`on` / `off` / `status`) that hides tool call noise and collapsed thinking labels while sailing a theme-aware moonlit harbor animation above the composer whenever the agent is working.
+
+No hardcoded user paths, no hardcoded providers, no orchestrator coupling. Bring your own providers, tiers, and model credentials.
 
 ## Install
 
@@ -13,18 +18,62 @@ A user-agnostic, provider-agnostic Pi harness package bundling four extensions i
 pi install git:github.com/1yian/ypi
 ```
 
-Or try it for one session without changing settings:
+Or add it directly to `~/.pi/agent/settings.json`:
 
-```bash
-pi -e git:github.com/1yian/ypi
+```json
+{
+  "theme": "ypi",
+  "packages": ["git:github.com/1yian/ypi"]
+}
 ```
 
-## Configure
+For automatic terminal light/dark switching, set `"theme": "ypi-light/ypi"` (or pick `ypi` in `/settings`).
 
-All configuration is opt-in and provider-agnostic:
+## Configure tiers
 
-1. **Model tiers (`~/.pi/agent/tiers.json`):** copy `templates/tiers.example.json` and fill in whichever providers and models you use (Anthropic, OpenAI, Google Vertex, OpenRouter, local models, etc.).
-2. **OptChat memory (`~/.pi/agent/optchat.json` or `<project>/.pi/optchat.json` or `YPI_OPTCHAT_CONFIG`):** copy `templates/optchat.example.json` and set `"enabled": true`.
-   - `compactorProvider` and `compactorModel` accept any provider/model in your Pi registry, including a `pi-tiers` virtual tier such as `"compactorProvider": "tier", "compactorModel": "compact"`.
-   - If omitted or unavailable, compaction falls back cleanly to the session's active model.
-   - `"mode": "fold"` keeps a plain prompt-cached transcript and folds into memory when context passes `foldTokens` (default `150000`) or after prompt cache expiry (`foldOnCacheExpiry: true`).
+Copy `templates/tiers.example.json` to `~/.pi/agent/tiers.json` and edit the provider/model chains for whatever providers you authenticate with Pi (`anthropic`, `openai`, `openai-codex`, `google`, `openrouter`, etc.).
+
+## Configure OptChat (optional)
+
+OptChat stays inactive until enabled in an `optchat.json` file. `ypi` checks, in order:
+
+1. `YPI_OPTCHAT_CONFIG` environment variable
+2. `<cwd>/.pi/optchat.json`
+3. `<PI_CODING_AGENT_DIR>/optchat.json` (defaults to `~/.pi/agent/optchat.json`)
+
+Copy `templates/optchat.example.json` to `~/.pi/agent/optchat.json`:
+
+```json
+{
+  "enabled": true,
+  "memoryHome": "~/.local/share/ypi/optchat",
+  "profile": "default",
+  "compactorProvider": "tier",
+  "compactorModel": "compact",
+  "thinking": "low",
+  "mode": "fold",
+  "foldTokens": 150000,
+  "foldOnCacheExpiry": true
+}
+```
+
+`compactorProvider` and `compactorModel` accept any provider and model registered in Pi (including `pi-tiers` virtual tiers like `tier` / `compact`). If omitted or unavailable, `ypi` falls back to the session's active model.
+
+## Calm mode
+
+Run `/calm` inside Pi to toggle focus mode (persisted to `~/.pi/agent/ypi-calm`, overridable via `YPI_CALM_FILE`):
+
+- Hides tool execution rows (while preserving tool images) and collapsed thinking labels; everything stays in LLM context and `/export`.
+- Replaces the default spinner row with a 3-row moonlit harbor sailboat animation tinted from your active Pi theme.
+- Toggle back anytime with `/calm` (or `/calm off`) to immediately reveal every tool row in the transcript.
+
+## Development
+
+```bash
+bun install
+bun run check
+```
+
+## License
+
+MIT. Vendored OptChat under `vendor/optchat/` retains its original MIT license and notices (`vendor/optchat/LICENSE`, `vendor/optchat/THIRD_PARTY_NOTICES.md`).

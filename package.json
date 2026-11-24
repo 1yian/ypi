@@ -1,7 +1,7 @@
 {
   "name": "ypi",
   "version": "0.1.0",
-  "description": "Provider-agnostic Pi harness bundle: pi-tiers, pi-web-access, pi-fff, and OptChat fold-mode memory with configurable compactor model/tier.",
+  "description": "Provider-agnostic Pi harness bundle: pi-tiers, pi-web-access, pi-fff, OptChat fold-mode memory, OpenCode/OMP-inspired TUI, ypi themes, and /calm mode.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -12,7 +12,12 @@
       "./node_modules/pi-tiers/src/index.ts",
       "./node_modules/pi-web-access/dist",
       "./node_modules/@ff-labs/pi-fff/src/index.ts",
-      "./src/optchat.ts"
+      "./src/optchat.ts",
+      "./src/tui.ts",
+      "./src/calm.ts"
+    ],
+    "themes": [
+      "./themes"
     ]
   },
   "scripts": {
