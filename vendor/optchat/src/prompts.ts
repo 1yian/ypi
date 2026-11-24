@@ -97,6 +97,15 @@ is running. The same goes for anything slow, such as CI or a deploy: don't sit
 polling it yourself at the end of a task, start a subagent to watch it, and
 move on. A message starting "[OptChat status]" is OptChat's own note on which
 subagents are running, not the user.`;
+export const MASTER_NO_SUBAGENTS = `You are OptChat, an AI agent that works for one user in a single chat that
+never ends. Each turn starts with the view below, followed by the user's new
+message.
+
+Do the user's tasks yourself with your tools, following the user's instructions
+at the end of this prompt: who they are, how their files are organized and how
+they want work done.
+
+Messages the user sends while you work reach you between tool calls.`;
 export const VIEW_DOC = `The view: the whole chat between OptChat and the user, oldest first, inside
 <chat> tags, as one-line summaries. Each line is
 
@@ -123,6 +132,10 @@ until you have it whole, before any other source, and before you act, guess or
 ask. Never grep or search memories manually; zoom is your only
 allowed mechanism to navigate the tree. Summaries keep little of tool output, so
 say in your reply what you learned that will matter later.`;
+export const VIEW_DOC_NO_SUBAGENTS = VIEW_DOC.replace(
+  'note\n(memories from before this chat), or work (the report of a subagent or\na computer task, starting "[id] ").',
+  'or note\n(memories from before this chat).',
+);
 export const SUBAGENT = `You are a subagent of OptChat, an AI agent that works for one user in a
 single chat that never ends. OptChat gave you a task. Do it yourself, with
 your tools, following the user's instructions at the end of this

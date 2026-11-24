@@ -26,6 +26,7 @@ interface Options {
   models: { name: string; thinking: readonly ThinkingLevel[] }[];
   /** Saves the whole profile config; throws if it can't be written. */
   save: (config: ProfileConfig) => void;
+  subagents?: boolean;
 }
 
 /** A titled step inside the page: what it changes, the control, and its keys. */
@@ -139,7 +140,10 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
     if (!problem) notice.setText(theme.fg('success', `Saved ${what}. `) + theme.fg('muted', applies));
     return problem;
   };
-  const models = (['compactor', 'subagent'] as const).map((role): SettingItem => {
+  const subagentsEnabled = o.subagents !== false;
+  const subagentSettingKeys = new Set<SettingKey>(['subagentLevels', 'maxAgents', 'groupReports']);
+  const roles: readonly Role[] = subagentsEnabled ? ['compactor', 'subagent'] : ['compactor'];
+  const models = roles.map((role): SettingItem => {
     const { label, description, applies } = ROLES[role];
     return { id: role, label, description: `${description} Default ${showModel(defaults[role])}. ${applies}`,
       currentValue: modelValue(theme, role, config[role]),
@@ -150,7 +154,8 @@ export function settingsPage(theme: Theme, o: Options, close: () => void, redraw
       }, () => done()),
     };
   });
-  const settings = SETTING_KEYS.map((key): SettingItem => {
+  const settingKeys = subagentsEnabled ? SETTING_KEYS : SETTING_KEYS.filter(key => !subagentSettingKeys.has(key));
+  const settings = settingKeys.map((key): SettingItem => {
     const spec = SETTINGS[key], base = { id: key, label: spec.label, description: `${spec.description} ${spec.applies}` };
     if (isNumberKey(key)) return { ...base, currentValue: value(key, config[key]),
       submenu: (_value, done) => new NumberStep(theme, key, config[key], next => {

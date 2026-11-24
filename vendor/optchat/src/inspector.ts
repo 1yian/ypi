@@ -37,12 +37,16 @@ const pages = ['agents', 'usage', 'activity'] as const;
 export type InspectorPage = typeof pages[number];
 const pageNames: Record<InspectorPage, string> = { agents: 'Agents', usage: 'Usage', activity: 'Activity' };
 /** Tab order, wrapping around: Agents, Usage, Activity. */
-export const nextPage = (page: InspectorPage, delta = 1) => pages[(pages.indexOf(page) + delta + pages.length) % pages.length];
+export const nextPage = (page: InspectorPage, delta = 1, includeAgents = true) => {
+  const list = includeAgents ? pages : (['usage', 'activity'] as const);
+  const idx = list.indexOf(page as (typeof list)[number]);
+  return list[((idx < 0 ? 0 : idx) + delta + list.length) % list.length];
+};
 /** Closing the panel either picks the subagent model or opens one agent's conversation. */
 export type InspectorAction = 'model' | { open: string };
 type Tone = 'accent' | 'muted' | 'dim' | 'error' | 'warning' | 'border';
 interface Options {
-  profile: string; session: string; children: Children; usage: UsageLedger; memory: Pick<Memory, 'root' | 'size' | 'budget' | 'lastError' | 'progress' | 'onChange'>; page: InspectorPage;
+  profile: string; session: string; children?: Children; usage: UsageLedger; memory: Pick<Memory, 'root' | 'size' | 'budget' | 'lastError' | 'progress' | 'onChange'>; page: InspectorPage;
   rows: () => number; redraw: () => void; done: (action?: InspectorAction) => void;
   color: (tone: Tone, text: string) => string;
   context: () => number | null | undefined;
@@ -66,9 +70,9 @@ export class Inspector implements Component, Focusable {
   private readonly unsubscribe: (() => void)[];
   private readonly timer: ReturnType<typeof setInterval>;
   constructor(private readonly options: Options) {
-    this.page = options.page;
-    this.selected = options.children.history.list()[0]?.id;
-    this.unsubscribe = [options.children.subscribe(() => options.redraw()), options.memory.onChange(() => options.redraw())];
+    this.page = !options.children && options.page === 'agents' ? 'activity' : options.page;
+    this.selected = options.children?.history.list()[0]?.id;
+    this.unsubscribe = [...(options.children ? [options.children.subscribe(() => options.redraw())] : []), options.memory.onChange(() => options.redraw())];
     this.timer = setInterval(() => { options.refreshUsage?.(); options.redraw(); }, 1000); this.timer.unref();
     options.signal?.addEventListener('abort', this.abort, { once: true });
     if (options.signal?.aborted) queueMicrotask(this.abort);
@@ -82,7 +86,7 @@ export class Inspector implements Component, Focusable {
   /** Body rows left after the rules, title, hint and spacing; the rest of the screen keeps the footer visible. */
   private get height() { return Math.max(1, Math.floor(this.options.rows() * 0.8) - 6 - (this.hintLines - 1)); }
   private select(delta: number) {
-    const list = this.options.children.history.list();
+    const list = this.options.children?.history.list() ?? [];
     const index = Math.max(0, list.findIndex(r => r.id === this.selected));
     this.selected = list[Math.max(0, Math.min(list.length - 1, index + delta))]?.id;
   }
@@ -91,7 +95,7 @@ export class Inspector implements Component, Focusable {
     if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) return this.finish();
     const deleting = this.confirmDelete; this.confirmDelete = undefined; this.notice = '';
     if (matchesKey(data, 'tab')) {
-      this.page = nextPage(this.page); this.scroll = 0;
+      this.page = nextPage(this.page, 1, this.options.children !== undefined); this.scroll = 0;
     } else if (this.page === 'activity') this.scrollInput(data);
     else if (this.page === 'usage') {
       if (matchesKey(data, 'left') || matchesKey(data, 'right')) {
@@ -116,7 +120,9 @@ export class Inspector implements Component, Focusable {
   }
   /** Once the run is gone, the cursor moves to the next row that is not, else the one above. */
   private remove(id: string) {
-    const { children } = this.options, list = children.history.list(), doomed = new Set([id, ...children.history.descendants(id).map(r => r.id)]);
+    const { children } = this.options;
+    if (!children) return;
+    const list = children.history.list(), doomed = new Set([id, ...children.history.descendants(id).map(r => r.id)]);
     const index = list.findIndex(r => r.id === id), next = list.slice(index).find(r => !doomed.has(r.id)) ?? list.slice(0, index).findLast(r => !doomed.has(r.id));
     children.remove(id).then(() => { if (!children.history.records.has(this.selected ?? '')) this.selected = next?.id; },
       (error: unknown) => { this.notice = `Not deleted: ${error instanceof Error ? error.message : String(error)}`; })
@@ -162,12 +168,14 @@ export class Inspector implements Component, Focusable {
   private activityLines(width: number) {
     const { memory, children, color } = this.options;
     const { done, total, retryIn } = memory.progress();
-    const list = children.history.list(), agents = list.filter(isRunning).length, paused = list.filter(r => r.state === 'paused').length, handingOff = list.filter(isHandingOff).length;
     const filled = total ? Math.floor(10 * done / total) : 0;
     const lines = [`${color('muted', 'Memory')} · ${count(memory.root.length)} messages · view ${Math.round(memory.size / 1000)} KB / ${Math.round(memory.budget / 1000)} KB`,
       total ? `Catching up · ${count(done)} of ${count(total)} summaries  ${color('accent', '█'.repeat(filled))}${color('dim', '░'.repeat(10 - filled))}` : color('dim', 'Settled')];
     if (memory.lastError) lines.push(color('dim', `${oneLine(memory.lastError)}${retryIn === undefined ? '' : ` · retry in ${elapsed(retryIn)}`}`));
-    lines.push('', `${color('muted', 'Agents')} · ${agents} running${paused ? ` · ${paused} interrupted` : ''}${handingOff ? ` · ${handingOff} handing off` : ''}`);
+    if (children) {
+      const list = children.history.list(), agents = list.filter(isRunning).length, paused = list.filter(r => r.state === 'paused').length, handingOff = list.filter(isHandingOff).length;
+      lines.push('', `${color('muted', 'Agents')} · ${agents} running${paused ? ` · ${paused} interrupted` : ''}${handingOff ? ` · ${handingOff} handing off` : ''}`);
+    }
     return lines.flatMap(l => l ? wrapTextWithAnsi(l, width) : ['']);
   }
   render(width: number): string[] {
@@ -175,12 +183,12 @@ export class Inspector implements Component, Focusable {
     const inner = Math.max(1, width - 2);
     let title = `OptChat · ${profile} · ${pageNames[this.page]}`;
     let info: string, body: string[], hint: string;
-    if (this.page !== 'agents') {
+    if (this.page !== 'agents' || !children) {
       const lines = this.page === 'usage' ? this.usageLines(inner) : this.activityLines(inner); this.lineCount = lines.length;
       this.scroll = Math.max(0, Math.min(this.scroll, lines.length - this.height));
       body = lines.slice(this.scroll, this.scroll + this.height);
       info = this.page === 'usage' || lines.length > this.height ? `${this.scroll + 1}–${Math.min(this.scroll + this.height, lines.length)} / ${lines.length}` : '';
-      hint = this.page === 'usage' ? '←→ period · ↑↓ scroll · Tab activity · Esc close' : '↑↓ scroll · Tab agents · Esc close';
+      hint = this.page === 'usage' ? '←→ period · ↑↓ scroll · Tab activity · Esc close' : `↑↓ scroll · Tab ${children ? 'agents' : 'usage'} · Esc close`;
     } else {
       const list = children.history.list();
       if (!this.selected) this.selected = list[0]?.id;

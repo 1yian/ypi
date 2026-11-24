@@ -62,6 +62,7 @@ OptChat fold-mode memory is **on by default** in `ypi`:
 - **Auto-fold:** keeps prompt caches warm across turns and auto-folds at **150k tokens** or when the prompt cache expires (`foldOnCacheExpiry: true`).
 - **Immediate `/compact`:** running `/compact` immediately flushes and settles the current conversation into OptChat's zoomable memory tree using the configured compactor and resets the active prompt window.
 - **Zero lock collisions:** each session automatically binds to its own session-scoped OptChat profile under `~/.pi/agent/ypi/optchat/profiles/` (persisted across `ypi -c` / `ypi -r`, cleaned up on exit for `--no-session`).
+- **Memory-only (no subagent chrome):** OptChat's background subagents (`spawn` / `tell` / `models`), below-editor Agents/Usage/Activity inspector bar, and `f6` shortcut are disabled in `ypi` so you only get fold-mode memory (`zoom`, `date`, `/compact`, `/fold`).
 
 To pin a persistent named profile (for example, a long-lived assistant) or customize settings, create `<cwd>/.pi/optchat.json` or `~/.pi/agent/optchat.json` (or set `YPI_OPTCHAT_CONFIG`):
 

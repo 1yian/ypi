@@ -26,6 +26,8 @@ export function searchPage(memory: Memory, text: string, before?: number) {
 
 const zoomParameters = Type.Object({ id: Type.Union([Type.Integer({ minimum: 0 }), Type.String({ minLength: 1 })]), n: Type.Optional(Type.Integer({ minimum: 1 })),
   offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: PAGE })) });
+const zoomMemoryParameters = Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Optional(Type.Integer({ minimum: 1 })),
+  offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: PAGE })) });
 
 /** A page of a run's transcript, saying where the next one starts. */
 export function runPage(text: string, offset = 0, limit = PAGE) {
@@ -39,15 +41,16 @@ export function runPage(text: string, offset = 0, limit = PAGE) {
 
 /** `runs` gives a subagent's messages by run id, live or finished; undefined for no such run. */
 export function memoryTools(memory: () => Memory, runs?: (id: string) => readonly AgentMessage[] | undefined) {
+  const baseDescription = `Open the line id+n of the view into the two lines of n/2 under it; n = 1 (the default) gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it, and are not needed for a shorter one. A message's images come back with it.`;
   return [
-    { name: 'zoom', label: 'Zoom memory', description: `Open the line id+n of the view into the two lines of n/2 under it; n = 1 (the default) gives the message whole. A message over ${PAGE.toLocaleString('en-US')} characters comes in pages; offset and limit (characters) read any part of it, and are not needed for a shorter one. A message's images come back with it. zoom("<run id>") gives a subagent's whole chat so far, in the same pages.`,
-      parameters: zoomParameters,
+    { name: 'zoom', label: 'Zoom memory', description: runs ? `${baseDescription} zoom("<run id>") gives a subagent's whole chat so far, in the same pages.` : baseDescription,
+      parameters: runs ? zoomParameters : zoomMemoryParameters,
       async execute(_id: string, { id, n = 1, offset, limit }: Static<typeof zoomParameters>) {
         if (typeof id === 'string') {
           const messages = runs?.(id);
           if (messages) return result(runPage(runTranscript(messages), offset, limit));
           // A model may quote a message id; eight digits can be a run id (src/agents.ts), so those never open a message.
-          if (!/^\d+$/.test(id) || id.length === 8) throw new Error(`No run ${id}.`);
+          if (!/^\d+$/.test(id) || (runs && id.length === 8)) throw new Error(`No run ${id}.`);
         }
         const m = memory(), text = m.zoom(Number(id), n, offset, limit), page = result(text);
         // A message's images come back with its text, as read returns a PNG; summaries stay text.

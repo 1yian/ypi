@@ -5,6 +5,7 @@ import { loadOptChatConfig, type ResolvedOptChatConfig } from "./config.ts";
 
 interface OptChatCapabilities {
   readonly connectedWindows?: boolean;
+  readonly subagents?: boolean;
   readonly viewBudget?: number;
   readonly transientCustomTypes?: readonly string[];
   readonly foldTokens?: number;
@@ -130,22 +131,18 @@ export default async function ypiOptChat(pi: ExtensionAPI): Promise<void> {
     if (compactor === undefined) return;
     const loaded = callExport(profilesRaw, "loadConfig", profilesUrl, [profileDir]);
     const previous = isRecord(loaded) ? loaded : {};
-    const subagent =
-      ctx.model === undefined
-        ? previous["subagent"]
-        : { provider: ctx.model.provider, model: ctx.model.id, thinking: "off" };
     callExport(profilesRaw, "saveConfig", profilesUrl, [
       profileDir,
       {
         ...previous,
         compactor,
-        ...(subagent !== undefined ? { subagent } : {}),
       },
     ]);
   });
 
   const capabilities: OptChatCapabilities = {
     connectedWindows: false,
+    subagents: false,
     ...(config.viewBudget !== undefined ? { viewBudget: config.viewBudget } : {}),
     ...(config.foldTokens !== undefined ? { foldTokens: config.foldTokens } : {}),
     ...(config.foldOnCacheExpiry ? { foldAfterIdle: cacheLifetimeMs } : {}),

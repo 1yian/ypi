@@ -213,6 +213,9 @@ interface CapturedUiState {
   hiddenThinkingLabel: string | undefined;
   editorFactory: EditorFactoryFn | undefined;
   readonly notifications: string[];
+  readonly statuses: Map<string, string | undefined>;
+  readonly widgets: Map<string, unknown>;
+  readonly titles: string[];
 }
 
 function createTestUiContext(theme: Theme, captured: CapturedUiState): ExtensionUIContext {
@@ -226,7 +229,9 @@ function createTestUiContext(theme: Theme, captured: CapturedUiState): Extension
       captured.notifications.push(message);
     },
     onTerminalInput: () => noop,
-    setStatus: noop,
+    setStatus(key: string, text: string | undefined) {
+      captured.statuses.set(key, text);
+    },
     setWorkingMessage: noop,
     setWorkingVisible(visible: boolean) {
       captured.workingVisible = visible;
@@ -235,10 +240,18 @@ function createTestUiContext(theme: Theme, captured: CapturedUiState): Extension
     setHiddenThinkingLabel(label?: string) {
       captured.hiddenThinkingLabel = label;
     },
-    setWidget: noop,
+    setWidget(key: string, content: unknown) {
+      if (content === undefined) {
+        captured.widgets.delete(key);
+      } else {
+        captured.widgets.set(key, content);
+      }
+    },
     setFooter: noop,
     setHeader: noop,
-    setTitle: noop,
+    setTitle(title: string) {
+      captured.titles.push(title);
+    },
     custom: () => Promise.reject(new Error("custom UI not used in headless test")),
     pasteToEditor(text: string) {
       editorText += text;
@@ -527,6 +540,9 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
       hiddenThinkingLabel: "Thinking...",
       editorFactory: undefined,
       notifications: [],
+      statuses: new Map(),
+      widgets: new Map(),
+      titles: [],
     };
     runner.setUIContext(createTestUiContext(theme, captured), "tui");
 
@@ -642,6 +658,180 @@ void test("Pi isolated extension loading hides all tool calls in calm mode, show
       delete process.env["YPI_CALM_FILE"];
     } else {
       process.env["YPI_CALM_FILE"] = prevCalmFile;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+void test("Pi OptChat extension disables subagents, inspector bar, and noisy status while keeping fold memory", async () => {
+  const dir = join("/tmp", `ypi-oc-${Date.now().toString(36)}`);
+  const agentDir = join(dir, "a");
+  mkdirSync(agentDir, { recursive: true });
+  const prevAgentDir = process.env["PI_CODING_AGENT_DIR"];
+  const prevOptchatHome = process.env["OPTCHAT_HOME"];
+  const prevYpiOptchat = process.env["YPI_OPTCHAT"];
+  process.env["PI_CODING_AGENT_DIR"] = agentDir;
+  delete process.env["YPI_OPTCHAT"];
+
+  try {
+    initTheme("dark");
+    const theme = buildThemeFromJson(join(ROOT, "themes", "ypi.json"));
+    const eventBus = createEventBus();
+    const loaded = await discoverAndLoadExtensions(
+      [join(ROOT, "src", "optchat.ts")],
+      dir,
+      agentDir,
+      eventBus,
+    );
+    assert.deepEqual(loaded.errors, []);
+    assert.equal(loaded.extensions.length, 1);
+
+    const modelRuntime = await ModelRuntime.create({
+      refreshOnCreate: false,
+      allowModelNetwork: false,
+      modelsPath: null,
+    });
+    const modelRegistry = new ModelRegistry(modelRuntime);
+    const sessionManager = SessionManager.inMemory(dir);
+    const runner = new ExtensionRunner(
+      loaded.extensions,
+      loaded.runtime,
+      dir,
+      sessionManager,
+      modelRegistry,
+    );
+
+    const activeTools = new Set<string>(["zoom", "date"]);
+    runner.bindCore(
+      {
+        sendMessage: noop,
+        sendUserMessage: noop,
+        appendEntry(customType: string, data?: unknown) {
+          sessionManager.appendCustomEntry(customType, data);
+        },
+        setSessionName: noop,
+        getSessionName: () => undefined,
+        setLabel: noop,
+        getActiveTools: () => [...activeTools],
+        getAllTools: () => [],
+        setActiveTools(names: string[]) {
+          activeTools.clear();
+          for (const name of names) activeTools.add(name);
+        },
+        refreshTools: noop,
+        getCommands: () => [],
+        setModel: () => Promise.resolve(false),
+        getThinkingLevel: () => "medium",
+        setThinkingLevel: noop,
+        getSettings: () => ({}),
+      },
+      {
+        getModel: () => undefined,
+        getScopedModels: () => [],
+        isIdle: () => true,
+        isProjectTrusted: () => true,
+        getSignal: () => undefined,
+        abort: noop,
+        shutdown: noop,
+        hasPendingMessages: () => false,
+        getContextUsage: () => undefined,
+        compact: noop,
+        getSystemPrompt: () => "",
+        getSystemPromptOptions: () => ({
+          selectedTools: [],
+          cwd: dir,
+          contextFiles: [],
+          skills: [],
+        }),
+        executeTool: () => Promise.reject(new Error("not used")),
+        getCallableTools: () => [],
+      },
+    );
+
+    const captured: CapturedUiState = {
+      workingVisible: undefined,
+      hiddenThinkingLabel: undefined,
+      editorFactory: undefined,
+      notifications: [],
+      statuses: new Map(),
+      widgets: new Map(),
+      titles: [],
+    };
+    runner.setUIContext(createTestUiContext(theme, captured), "tui");
+
+    const toolNames = new Set(runner.getAllRegisteredTools().map((entry) => entry.definition.name));
+    assert.ok(toolNames.has("zoom"), "zoom memory tool must stay registered");
+    assert.ok(toolNames.has("date"), "date memory tool must stay registered");
+    assert.ok(!toolNames.has("spawn"), "spawn subagent tool must not be registered");
+    assert.ok(!toolNames.has("models"), "models subagent tool must not be registered");
+    assert.ok(!toolNames.has("tell"), "tell subagent tool must not be registered");
+
+    const zoomTool = runner.getToolDefinition("zoom");
+    assert.ok(zoomTool !== undefined);
+    assert.ok(
+      !zoomTool.description.toLowerCase().includes("subagent"),
+      "zoom tool description must not mention subagents",
+    );
+
+    assert.equal(runner.getCommand("complete"), undefined);
+    assert.equal(runner.getCommand("tell-main"), undefined);
+    assert.ok(runner.getCommand("fold") !== undefined);
+    assert.ok(runner.getCommand("optchat") !== undefined);
+    assert.equal(runner.getShortcuts({}).size, 0, "inspector shortcut must not be bound");
+
+    await runner.emit({ type: "session_start", reason: "startup" });
+
+    assert.deepEqual(
+      captured.notifications,
+      [],
+      "startup must not emit error or noisy OptChat banner notifications",
+    );
+    assert.equal(
+      captured.widgets.has("optchat-agents"),
+      false,
+      "below-editor Agents/Usage/Activity bar must not mount",
+    );
+    assert.equal(
+      captured.statuses.get("optchat"),
+      undefined,
+      "empty session should not clutter footer with OptChat status",
+    );
+    assert.equal(captured.titles.length, 0, "must not overwrite terminal tab title");
+
+    const beforeStart = await runner.emitBeforeAgentStart(
+      { messageType: "user", prompt: "hello" },
+      {
+        selectedTools: [],
+        cwd: dir,
+        contextFiles: [],
+        skills: [],
+      },
+    );
+    const builtPrompt = beforeStart.systemPromptOptions.customPrompt ?? "";
+    assert.ok(builtPrompt.includes("zoom(id, n)"), "memory view navigation must stay in prompt");
+    assert.ok(!builtPrompt.toLowerCase().includes("subagent"), "prompt must not mention subagents");
+    assert.ok(!builtPrompt.includes("models()"), "prompt must not mention models()");
+    assert.ok(
+      !builtPrompt.includes("[OptChat status]"),
+      "prompt must not mention [OptChat status]",
+    );
+
+    await runner.emit({ type: "session_shutdown", reason: "quit" });
+  } finally {
+    if (prevAgentDir === undefined) {
+      delete process.env["PI_CODING_AGENT_DIR"];
+    } else {
+      process.env["PI_CODING_AGENT_DIR"] = prevAgentDir;
+    }
+    if (prevOptchatHome === undefined) {
+      delete process.env["OPTCHAT_HOME"];
+    } else {
+      process.env["OPTCHAT_HOME"] = prevOptchatHome;
+    }
+    if (prevYpiOptchat === undefined) {
+      delete process.env["YPI_OPTCHAT"];
+    } else {
+      process.env["YPI_OPTCHAT"] = prevYpiOptchat;
     }
     rmSync(dir, { recursive: true, force: true });
   }
