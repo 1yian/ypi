@@ -1,0 +1,5 @@
+{
+  "printWidth": 100,
+  "sortPackageJson": false,
+  "ignorePatterns": ["bun.lock", "vendor/", "AGENTS.md"]
+}

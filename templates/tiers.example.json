@@ -1,0 +1,26 @@
+{
+  "cooldowns": {
+    "rateLimitSeconds": 120,
+    "serverErrorSeconds": 15,
+    "usageLimitSeconds": 3600,
+    "authSeconds": 3600
+  },
+  "tiers": {
+    "default": {
+      "description": "General coding, fixes, and implementation from a known plan.",
+      "chain": ["<provider>/<model>:medium"]
+    },
+    "deep": {
+      "description": "Architecture, root-cause investigation, and open-ended planning.",
+      "chain": ["<provider>/<reasoning-model>:high"]
+    },
+    "quick": {
+      "description": "Small bounded chores, docs, and renames.",
+      "chain": ["<provider>/<fast-model>:low"]
+    },
+    "compact": {
+      "description": "OptChat context compaction and summarization.",
+      "chain": ["<provider>/<fast-model>:low"]
+    }
+  }
+}

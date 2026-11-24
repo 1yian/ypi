@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "memoryHome": "~/.pi/agent/optchat",
+  "profile": "default",
+  "compactorProvider": "tier",
+  "compactorModel": "compact",
+  "thinking": "low",
+  "mode": "fold",
+  "foldTokens": 150000,
+  "foldOnCacheExpiry": true
+}

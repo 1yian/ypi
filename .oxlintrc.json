@@ -1,0 +1,90 @@
+{
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "pedantic": "error",
+    "perf": "error",
+    "style": "error",
+    "restriction": "error"
+  },
+  "plugins": ["typescript", "eslint", "unicorn", "oxc", "import", "promise", "node"],
+  "jsPlugins": [
+    {
+      "name": "ypi",
+      "specifier": "./lint-plugin.js"
+    }
+  ],
+  "ignorePatterns": ["**/node_modules/", "**/dist/", "vendor/"],
+  "options": {
+    "respectEslintDisableDirectives": false,
+    "reportUnusedDisableDirectives": "error"
+  },
+  "rules": {
+    "ypi/no-comments": "error",
+    "eslint/curly": "off",
+    "eslint/func-style": "off",
+    "eslint/id-length": "off",
+    "eslint/init-declarations": "off",
+    "eslint/max-lines": "off",
+    "eslint/max-lines-per-function": "off",
+    "eslint/max-params": "off",
+    "eslint/max-statements": "off",
+    "eslint/no-await-in-loop": "off",
+    "eslint/no-continue": "off",
+    "eslint/no-inline-comments": "off",
+    "eslint/no-magic-numbers": "off",
+    "eslint/no-negated-condition": "off",
+    "eslint/no-nested-ternary": "off",
+    "eslint/no-plusplus": "off",
+    "eslint/no-ternary": "off",
+    "eslint/no-undefined": "off",
+    "eslint/no-void": "off",
+    "eslint/one-var": "off",
+    "eslint/prefer-destructuring": "off",
+    "eslint/prefer-named-capture-group": "off",
+    "eslint/sort-imports": "off",
+    "eslint/sort-keys": "off",
+    "eslint/capitalized-comments": "off",
+    "import/consistent-type-specifier-style": "off",
+    "import/exports-last": "off",
+    "import/group-exports": "off",
+    "import/max-dependencies": "off",
+    "import/no-named-export": "off",
+    "import/no-nodejs-modules": "off",
+    "import/no-relative-parent-imports": "off",
+    "import/prefer-default-export": "off",
+    "node/no-process-env": "off",
+    "node/no-sync": "off",
+    "node/no-top-level-await": "off",
+    "oxc/no-async-await": "off",
+    "oxc/no-optional-chaining": "off",
+    "oxc/no-rest-spread-properties": "off",
+    "promise/avoid-new": "off",
+    "promise/prefer-await-to-callbacks": "off",
+    "promise/prefer-await-to-then": "off",
+    "typescript/consistent-type-definitions": "off",
+    "typescript/dot-notation": "off",
+    "typescript/explicit-function-return-type": "off",
+    "typescript/explicit-module-boundary-types": "off",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/prefer-readonly-parameter-types": "off",
+    "typescript/promise-function-async": "off",
+    "unicorn/import-style": "off",
+    "unicorn/no-array-reduce": "off",
+    "unicorn/no-negated-condition": "off",
+    "unicorn/no-nested-ternary": "off",
+    "unicorn/no-null": "off",
+    "unicorn/no-process-exit": "off",
+    "unicorn/no-useless-undefined": "off",
+    "unicorn/prefer-ternary": "off",
+    "unicorn/switch-case-braces": "off"
+  },
+  "overrides": [
+    {
+      "files": ["src/optchat.ts"],
+      "rules": {
+        "import/no-default-export": "off"
+      }
+    }
+  ]
+}
