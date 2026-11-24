@@ -21,12 +21,31 @@ function cacheLifetimeMs(model: ExtensionContext["model"]): number | undefined {
   return seconds === undefined ? undefined : seconds * 1000;
 }
 
-function ensureProfileDir(memoryHome: string, profile: string): string {
+function callExport(mod: unknown, name: string, source: string, args: unknown[]): unknown {
+  if (!isRecord(mod)) throw new TypeError(`${source} did not return a module object`);
+  const fn: unknown = Reflect.get(mod, name);
+  if (typeof fn !== "function") throw new TypeError(`${source} does not export function ${name}`);
+  return Reflect.apply(fn, undefined, args);
+}
+
+function ensureProfileDir(
+  profilesRaw: unknown,
+  profilesUrl: string,
+  memoryHome: string,
+  profile: string,
+): string {
   const dir = resolve(memoryHome, "profiles", profile);
-  mkdirSync(dir, { recursive: true });
-  const instructionsPath = resolve(dir, "AGENTS.md");
-  if (!existsSync(instructionsPath)) {
-    writeFileSync(instructionsPath, `# ${profile}\n`);
+  if (!existsSync(dir)) {
+    callExport(profilesRaw, "createProfile", profilesUrl, [profile]);
+    return dir;
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (!existsSync(resolve(dir, "config.json"))) {
+    const defaults: unknown = isRecord(profilesRaw) ? Reflect.get(profilesRaw, "defaults") : {};
+    callExport(profilesRaw, "saveConfig", profilesUrl, [dir, isRecord(defaults) ? defaults : {}]);
+  }
+  if (!existsSync(resolve(dir, "AGENTS.md"))) {
+    writeFileSync(resolve(dir, "AGENTS.md"), `# ${profile}\n`);
   }
   return dir;
 }
@@ -63,24 +82,16 @@ function resolveCompactor(
   return undefined;
 }
 
-function callExport(mod: unknown, name: string, source: string, args: unknown[]): unknown {
-  if (!isRecord(mod)) throw new TypeError(`${source} did not return a module object`);
-  const fn: unknown = Reflect.get(mod, name);
-  if (typeof fn !== "function") throw new TypeError(`${source} does not export function ${name}`);
-  return Reflect.apply(fn, undefined, args);
-}
-
 export default async function ypiOptChat(pi: ExtensionAPI): Promise<void> {
   const config = loadOptChatConfig();
   if (config === undefined) return;
 
   process.env["OPTCHAT_HOME"] = config.memoryHome;
-  const profileDir = ensureProfileDir(config.memoryHome, config.profile);
-
   const optchatUrl = new URL("../vendor/optchat/src/index.ts", import.meta.url).href;
   const profilesUrl = new URL("../vendor/optchat/src/profiles.ts", import.meta.url).href;
   const optchatRaw: unknown = await import(optchatUrl);
   const profilesRaw: unknown = await import(profilesUrl);
+  const profileDir = ensureProfileDir(profilesRaw, profilesUrl, config.memoryHome, config.profile);
 
   pi.on("session_start", (_event, ctx) => {
     const entries = ctx.sessionManager.getEntries();
