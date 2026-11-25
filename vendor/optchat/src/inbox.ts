@@ -48,6 +48,9 @@ export class Inbox {
   acknowledge(id: string) {
     this.items = this.items.filter(i => i.id !== id); this.claimed.delete(id); this.save();
   }
+  clear() {
+    this.items = []; this.claimed.clear(); this.queued.clear(); this.save();
+  }
   recover(memory: Memory) {
     let count = 0;
     const receipts = new Set(memory.root.map(e => e.receipt));

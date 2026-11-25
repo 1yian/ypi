@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { SessionEntry } from '@earendil-works/pi-coding-agent';
 import { getCurrentSystemMessage, type SystemMessage, type UserMessage } from '@earendil-works/pi-ai';
-import { CAP, cap, flat, isView, type Memory } from './memory.ts';
+import { CAP, cap, flat, isView, type Kind, type Memory } from './memory.ts';
 import { AT_WORK } from './prompts.ts';
 import { record } from './cache.ts';
 import { DEFAULT_SETTINGS } from './settings.ts';
@@ -46,19 +46,78 @@ export function asUser(message: AgentMessage): AgentMessage {
   if (first?.type === 'text') return { role: 'user', content: [{ ...first, text: tag + first.text }, ...rest], timestamp };
   return { role: 'user', content: [{ type: 'text', text: tag.trimEnd() }, ...content], timestamp };
 }
-export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
+export interface LoggedEntry {
+  kind: Kind;
+  text: string;
+  date: string;
+  receipt?: string;
+}
+
+export function entriesFromMessage(message: AgentMessage, receipt?: string): LoggedEntry[] {
   const date = new Date(message.timestamp).toISOString();
-  if (message.role === 'user') memory.append(receipt?.startsWith(REPORT_RECEIPT) ? 'work' : 'user', textContent(message.content), date, receipt);
-  else if (message.role === 'assistant') {
+  if (message.role === 'user') {
+    return [{ kind: receipt?.startsWith(REPORT_RECEIPT) ? 'work' : 'user', text: textContent(message.content), date, ...(receipt ? { receipt } : {}) }];
+  }
+  if (message.role === 'assistant') {
+    const out: LoggedEntry[] = [];
     for (const block of message.content) {
-      if (block.type === 'text' && block.text.trim()) memory.append('talk', block.text, date);
-      if (block.type === 'toolCall') memory.append('tool', `${block.name} ${JSON.stringify(block.arguments)}`, date);
+      if (block.type === 'text' && block.text.trim()) out.push({ kind: 'talk', text: block.text, date });
+      if (block.type === 'toolCall') out.push({ kind: 'tool', text: `${block.name} ${JSON.stringify(block.arguments)}`, date });
     }
-    if (message.stopReason === 'error' || message.stopReason === 'aborted')
-      memory.append('echo', `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date);
-  } else if (message.role === 'toolResult')
-    // A zoom's page already names the images it returns.
-    memory.append('echo', cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom')}`), date);
+    if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+      out.push({ kind: 'echo', text: `Agent ${message.stopReason}: ${message.errorMessage ?? 'No further details'}`, date });
+    }
+    return out;
+  }
+  if (message.role === 'toolResult') {
+    return [{ kind: 'echo', text: cap(`${message.toolName}: ${textContent(message.content, message.toolName !== 'zoom')}`), date }];
+  }
+  return [];
+}
+
+export function logMessage(memory: Memory, message: AgentMessage, receipt?: string) {
+  for (const entry of entriesFromMessage(message, receipt)) {
+    memory.append(entry.kind, entry.text, entry.date, entry.receipt);
+  }
+}
+
+export function branchMemoryEntries(
+  branch: readonly SessionEntry[],
+  transientCustomTypes: readonly string[] = [],
+): LoggedEntry[] {
+  const out: LoggedEntry[] = [];
+  for (const entry of branch) {
+    if (entry.type === 'message') {
+      const bounded = boundedMessage(entry.message);
+      if (bounded.role === 'custom' && transientCustomTypes.includes(bounded.customType)) continue;
+      const message = asUser(bounded);
+      const receipt = bounded.role === 'custom' && bounded.customType === REPORT_TYPE
+        ? reportReceipt(textContent(message.content))
+        : undefined;
+      out.push(...entriesFromMessage(message, receipt));
+      continue;
+    }
+    if (entry.type === 'custom_message') {
+      if (transientCustomTypes.includes(entry.customType) || !entry.display) continue;
+      const custom: AgentMessage = {
+        role: 'custom',
+        customType: entry.customType,
+        content: entry.content,
+        display: entry.display,
+        timestamp: Date.parse(entry.timestamp),
+      };
+      const message = asUser(custom);
+      const receipt = entry.customType === REPORT_TYPE
+        ? reportReceipt(textContent(message.content))
+        : undefined;
+      out.push(...entriesFromMessage(message, receipt));
+      continue;
+    }
+    if (entry.type === 'branch_summary' && entry.summary.trim()) {
+      out.push({ kind: 'note', text: `Branch summary: ${entry.summary.trim()}`, date: entry.timestamp });
+    }
+  }
+  return out;
 }
 export function boundedMessage(message: AgentMessage): AgentMessage {
   if (message.role !== 'toolResult') return message;

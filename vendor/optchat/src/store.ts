@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, statSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Entry, Summary } from './memory.ts';
 
@@ -38,6 +38,7 @@ export interface Store {
   appendNode(node: Summary): Write;
   /** Replaces the saved view. */
   saveView(view: string): Write;
+  rewrite?(entries: readonly Entry[], nodes: readonly Summary[], view: string): Write;
   putImage(name: string, mimeType: Mime, data: Uint8Array): Write;
   image(name: string): Maybe<{ mimeType: Mime; data: Uint8Array } | undefined>;
   lock?: Lease;
@@ -119,6 +120,45 @@ export class FileStore implements Store {
   }
   appendNode(node: Summary): undefined { appendJson(join(this.directory, 'tree', `${localDay()}.jsonl`), node); }
   saveView(view: string): undefined { atomicWrite(join(this.directory, 'view.json'), view); }
+  rewrite(entries: readonly Entry[], nodes: readonly Summary[], view: string): undefined {
+    const mainDir = join(this.directory, 'main');
+    const treeDir = join(this.directory, 'tree');
+    mkdirSync(mainDir, { recursive: true, mode: 0o700 });
+    mkdirSync(treeDir, { recursive: true, mode: 0o700 });
+    const byDay = new Map<string, Entry[]>();
+    for (const entry of entries) {
+      const parsed = new Date(entry.date);
+      const day = Number.isNaN(parsed.getTime()) ? localDay() : localDay(parsed);
+      const bucket = byDay.get(day);
+      if (bucket) bucket.push(entry);
+      else byDay.set(day, [entry]);
+    }
+    const keptMain = new Set<string>();
+    this.lastSeenBytes.clear();
+    for (const [day, list] of [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      const name = `${day}.jsonl`;
+      const file = join(mainDir, name);
+      const content = list.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+      atomicWrite(file, content);
+      keptMain.add(name);
+      this.lastSeenBytes.set(file, statSync(file).size);
+    }
+    for (const name of readdirSync(mainDir).filter(n => n.endsWith('.jsonl'))) {
+      if (!keptMain.has(name)) rmSync(join(mainDir, name), { force: true });
+    }
+    const keptTree = new Set<string>();
+    if (nodes.length > 0) {
+      const name = `${localDay()}.jsonl`;
+      const file = join(treeDir, name);
+      const content = nodes.map(node => JSON.stringify(node)).join('\n') + '\n';
+      atomicWrite(file, content);
+      keptTree.add(name);
+    }
+    for (const name of readdirSync(treeDir).filter(n => n.endsWith('.jsonl'))) {
+      if (!keptTree.has(name)) rmSync(join(treeDir, name), { force: true });
+    }
+    atomicWrite(join(this.directory, 'view.json'), view);
+  }
   putImage(name: string, mimeType: Mime, data: Uint8Array): undefined { atomicWrite(join(this.directory, 'images', `${name}.${EXTENSIONS[mimeType]}`), data); }
   image(name: string) {
     let file: string | undefined;

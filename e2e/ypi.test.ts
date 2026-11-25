@@ -1260,3 +1260,381 @@ void test("YPI_AUTO_EXIT shuts down unattended interactive turns and cancels on 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+interface OptChatHarness {
+  readonly runner: ExtensionRunner;
+  readonly sessionManager: SessionManager;
+  readonly captured: CapturedUiState;
+  readonly runTurn: (
+    userText: string,
+    replyText: string,
+  ) => Promise<{
+    readonly userId: string;
+    readonly assistantId: string;
+    readonly contextText: string;
+  }>;
+  readonly zoom: (id: number, n?: number) => Promise<string>;
+}
+
+async function createOptChatHarness(
+  dir: string,
+  agentDir: string,
+  sessionManager: SessionManager,
+  theme: Theme,
+): Promise<OptChatHarness> {
+  const eventBus = createEventBus();
+  const loaded = await discoverAndLoadExtensions(
+    [join(ROOT, "src", "optchat.ts")],
+    dir,
+    agentDir,
+    eventBus,
+  );
+  assert.deepEqual(loaded.errors, []);
+
+  const modelRuntime = await ModelRuntime.create({
+    refreshOnCreate: false,
+    allowModelNetwork: false,
+    modelsPath: null,
+  });
+  const modelRegistry = new ModelRegistry(modelRuntime);
+  const runner = new ExtensionRunner(
+    loaded.extensions,
+    loaded.runtime,
+    dir,
+    sessionManager,
+    modelRegistry,
+  );
+  const activeTools = new Set<string>(["zoom", "date"]);
+  let lastSystemPrompt = "";
+  runner.bindCore(
+    {
+      sendMessage: noop,
+      sendUserMessage: noop,
+      appendEntry(customType: string, data?: unknown) {
+        sessionManager.appendCustomEntry(customType, data);
+      },
+      setSessionName: noop,
+      getSessionName: () => undefined,
+      setLabel: noop,
+      getActiveTools: () => [...activeTools],
+      getAllTools: () => [],
+      setActiveTools(names: string[]) {
+        activeTools.clear();
+        for (const name of names) activeTools.add(name);
+      },
+      refreshTools: noop,
+      getCommands: () => [],
+      setModel: () => Promise.resolve(false),
+      getThinkingLevel: () => "medium",
+      setThinkingLevel: noop,
+      getSettings: () => ({}),
+    },
+    {
+      getModel: () => undefined,
+      getScopedModels: () => [],
+      isIdle: () => true,
+      isProjectTrusted: () => true,
+      getSignal: () => undefined,
+      abort: noop,
+      shutdown: noop,
+      hasPendingMessages: () => false,
+      getContextUsage: () => undefined,
+      compact: noop,
+      getSystemPrompt: () => lastSystemPrompt,
+      getSystemPromptOptions: () => ({
+        selectedTools: [],
+        cwd: dir,
+        contextFiles: [],
+        skills: [],
+      }),
+      executeTool: () => Promise.reject(new Error("not used")),
+      getCallableTools: () => [],
+    },
+  );
+
+  const captured: CapturedUiState = {
+    workingVisible: undefined,
+    hiddenThinkingLabel: undefined,
+    editorFactory: undefined,
+    notifications: [],
+    statuses: new Map(),
+    widgets: new Map(),
+    titles: [],
+  };
+  runner.setUIContext(createTestUiContext(theme, captured), "tui");
+
+  const runTurn = async (userText: string, replyText: string) => {
+    const now = Date.now();
+    await runner.emitInput(userText, undefined, "interactive");
+    const before = await runner.emitBeforeAgentStart(
+      { messageType: "user", prompt: userText },
+      { selectedTools: [], cwd: dir, contextFiles: [], skills: [] },
+    );
+    lastSystemPrompt = before.systemPromptOptions.customPrompt ?? "";
+    await runner.emit({ type: "agent_start" });
+
+    const userMsg = {
+      role: "user" as const,
+      content: [{ type: "text" as const, text: userText }],
+      timestamp: now,
+    };
+    const userId = sessionManager.appendMessage(userMsg);
+    await runner.emitMessageEnd({ type: "message_end", message: userMsg });
+
+    const contextMessages = await runner.emitContext([
+      { role: "system", content: lastSystemPrompt, timestamp: 0 },
+      userMsg,
+    ]);
+    const contextText = contextMessages
+      .map((m) => {
+        if (!("content" in m)) return "";
+        if (typeof m.content === "string") return m.content;
+        if (!Array.isArray(m.content)) return "";
+        return m.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+      })
+      .join("\n---\n");
+
+    const assistantMsg = {
+      role: "assistant" as const,
+      content: [{ type: "text" as const, text: replyText }],
+      api: "anthropic-messages" as const,
+      provider: "anthropic",
+      model: "test-model",
+      usage: {
+        input: 10,
+        output: 10,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 20,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop" as const,
+      timestamp: now + 1,
+    };
+    const assistantId = sessionManager.appendMessage(assistantMsg);
+    await runner.emitMessageEnd({ type: "message_end", message: assistantMsg });
+    await runner.emit({ type: "agent_settled", aborted: false });
+
+    return { userId, assistantId, contextText };
+  };
+
+  const zoom = async (id: number, n = 1) => {
+    const def = runner.getToolDefinition("zoom");
+    assert.ok(def !== undefined, "zoom tool must exist");
+    const toolCtx = runner.createToolContext("zoom-call", undefined);
+    const out = await def.execute("zoom-call", { id, n }, undefined, undefined, toolCtx);
+    return out.content.map((c) => (c.type === "text" ? c.text : "")).join("\n");
+  };
+
+  return { runner, sessionManager, captured, runTurn, zoom };
+}
+
+void test("Pi /tree rewind, /fork isolation, and named-profile pre-session history stay synced with OptChat memory", async () => {
+  const dir = join("/tmp", `ypi-rw-${Date.now().toString(36)}`);
+  const agentDir = join(dir, "a");
+  const sessionsDir = join(dir, "s");
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(sessionsDir, { recursive: true });
+
+  const prevAgentDir = process.env["PI_CODING_AGENT_DIR"];
+  const prevOptchatHome = process.env["OPTCHAT_HOME"];
+  const prevYpiOptchat = process.env["YPI_OPTCHAT"];
+  const prevYpiOptchatConfig = process.env["YPI_OPTCHAT_CONFIG"];
+  process.env["PI_CODING_AGENT_DIR"] = agentDir;
+  delete process.env["YPI_OPTCHAT"];
+  delete process.env["YPI_OPTCHAT_CONFIG"];
+
+  const activeHarnesses = new Set<OptChatHarness>();
+  const startHarness = async (
+    sessionManager: SessionManager,
+    theme: Theme,
+    event:
+      | { readonly type: "session_start"; readonly reason: "startup" | "resume" }
+      | {
+          readonly type: "session_start";
+          readonly reason: "fork";
+          readonly previousSessionFile?: string;
+        },
+  ): Promise<OptChatHarness> => {
+    const h = await createOptChatHarness(dir, agentDir, sessionManager, theme);
+    activeHarnesses.add(h);
+    await h.runner.emit(event);
+    return h;
+  };
+  const stopHarness = async (
+    h: OptChatHarness,
+    reason: "quit" | "fork" = "quit",
+  ): Promise<void> => {
+    if (!activeHarnesses.delete(h)) return;
+    await h.runner.emit({ type: "session_shutdown", reason });
+  };
+
+  try {
+    initTheme("dark");
+    const theme = buildThemeFromJson(join(ROOT, "themes", "ypi.json"));
+
+    const s1 = SessionManager.create(dir, sessionsDir);
+    const h1 = await startHarness(s1, theme, { type: "session_start", reason: "startup" });
+
+    const t1 = await h1.runTurn("alpha-prompt", "alpha-answer");
+    const t2 = await h1.runTurn("beta-prompt", "beta-answer");
+    const t3 = await h1.runTurn("gamma-prompt", "gamma-answer");
+
+    assert.equal(h1.captured.statuses.get("optchat"), "memory · 6 msgs");
+    const z4 = await h1.zoom(4, 1);
+    assert.ok(z4.includes("gamma-prompt"));
+
+    const oldLeaf = s1.getLeafId();
+    s1.branch(t1.assistantId);
+    await h1.runner.emit({
+      type: "session_tree",
+      oldLeafId: oldLeaf,
+      newLeafId: t1.assistantId,
+    });
+
+    assert.equal(h1.captured.statuses.get("optchat"), "memory · 2 msgs");
+    const z0 = await h1.zoom(0, 1);
+    assert.ok(z0.includes("alpha-prompt"));
+    await assert.rejects(h1.zoom(2, 1), /No line 2\+1/u);
+
+    const t2Alt = await h1.runTurn("delta-prompt", "delta-answer");
+    assert.ok(t2Alt.contextText.includes("alpha-prompt"));
+    assert.ok(t2Alt.contextText.includes("alpha-answer"));
+    assert.equal(t2Alt.contextText.includes("beta-prompt"), false);
+    assert.equal(t2Alt.contextText.includes("gamma-prompt"), false);
+    assert.equal(h1.captured.statuses.get("optchat"), "memory · 4 msgs");
+
+    s1.branch(t3.assistantId);
+    await h1.runner.emit({
+      type: "session_tree",
+      oldLeafId: t2Alt.assistantId,
+      newLeafId: t3.assistantId,
+    });
+    assert.equal(h1.captured.statuses.get("optchat"), "memory · 6 msgs");
+    const z4Restored = await h1.zoom(4, 1);
+    const z2Restored = await h1.zoom(2, 1);
+    assert.ok(z4Restored.includes("gamma-prompt"));
+    assert.equal(z2Restored.includes("delta-prompt"), false);
+
+    s1.resetLeaf();
+    await h1.runner.emit({
+      type: "session_tree",
+      oldLeafId: t3.assistantId,
+      newLeafId: null,
+    });
+    assert.equal(h1.captured.statuses.get("optchat"), undefined);
+    await assert.rejects(h1.zoom(0, 1), /No line 0\+1/u);
+
+    s1.branch(t2.assistantId);
+    await h1.runner.emit({
+      type: "session_tree",
+      oldLeafId: null,
+      newLeafId: t2.assistantId,
+    });
+    assert.equal(h1.captured.statuses.get("optchat"), "memory · 4 msgs");
+    const s1File = s1.getSessionFile();
+    assert.ok(s1File !== undefined);
+    await stopHarness(h1, "fork");
+
+    const s2 = SessionManager.open(s1File, sessionsDir);
+    const forkedFile = s2.createBranchedSession(t1.assistantId);
+    assert.ok(forkedFile !== undefined);
+    const h2 = await startHarness(s2, theme, {
+      type: "session_start",
+      reason: "fork",
+      previousSessionFile: s1File,
+    });
+
+    assert.equal(h2.captured.statuses.get("optchat"), "memory · 2 msgs");
+    const z0Fork = await h2.zoom(0, 1);
+    assert.ok(z0Fork.includes("alpha-prompt"));
+    await assert.rejects(h2.zoom(2, 1), /No line 2\+1/u);
+
+    const t2Fork = await h2.runTurn("fork-prompt", "fork-answer");
+    assert.ok(t2Fork.contextText.includes("alpha-prompt"));
+    assert.equal(t2Fork.contextText.includes("beta-prompt"), false);
+    await stopHarness(h2);
+
+    const s1Resumed = SessionManager.open(s1File, sessionsDir);
+    const h1Resumed = await startHarness(s1Resumed, theme, {
+      type: "session_start",
+      reason: "resume",
+    });
+    assert.equal(h1Resumed.captured.statuses.get("optchat"), "memory · 4 msgs");
+    const z2Resumed = await h1Resumed.zoom(2, 1);
+    assert.ok(z2Resumed.includes("beta-prompt"));
+    await stopHarness(h1Resumed);
+
+    const namedConfigPath = join(dir, "named-optchat.json");
+    writeFileSync(
+      namedConfigPath,
+      JSON.stringify({
+        enabled: true,
+        memoryHome: join(dir, "named-mem"),
+        profile: "jarvis",
+        mode: "fold",
+        foldTokens: 256_000,
+      }),
+    );
+    process.env["YPI_OPTCHAT_CONFIG"] = namedConfigPath;
+
+    const priorSession = SessionManager.create(dir, sessionsDir);
+    const priorHarness = await startHarness(priorSession, theme, {
+      type: "session_start",
+      reason: "startup",
+    });
+    await priorHarness.runTurn("prior-session-q", "prior-session-a");
+    assert.equal(priorHarness.captured.statuses.get("optchat"), "memory · 2 msgs");
+    await stopHarness(priorHarness);
+
+    const nextSession = SessionManager.create(dir, sessionsDir);
+    const nextHarness = await startHarness(nextSession, theme, {
+      type: "session_start",
+      reason: "startup",
+    });
+    assert.equal(nextHarness.captured.statuses.get("optchat"), "memory · 2 msgs");
+
+    const nt1 = await nextHarness.runTurn("current-q1", "current-a1");
+    const nt2 = await nextHarness.runTurn("current-q2", "current-a2");
+    assert.equal(nextHarness.captured.statuses.get("optchat"), "memory · 6 msgs");
+
+    nextSession.branch(nt1.assistantId);
+    await nextHarness.runner.emit({
+      type: "session_tree",
+      oldLeafId: nt2.assistantId,
+      newLeafId: nt1.assistantId,
+    });
+    assert.equal(nextHarness.captured.statuses.get("optchat"), "memory · 4 msgs");
+    const nz0 = await nextHarness.zoom(0, 1);
+    const nz2 = await nextHarness.zoom(2, 1);
+    assert.ok(nz0.includes("prior-session-q"));
+    assert.ok(nz2.includes("current-q1"));
+    await assert.rejects(nextHarness.zoom(4, 1), /No line 4\+1/u);
+
+    nextSession.resetLeaf();
+    await nextHarness.runner.emit({
+      type: "session_tree",
+      oldLeafId: nt1.assistantId,
+      newLeafId: null,
+    });
+    assert.equal(nextHarness.captured.statuses.get("optchat"), "memory · 2 msgs");
+    const nz0Root = await nextHarness.zoom(0, 1);
+    assert.ok(nz0Root.includes("prior-session-q"));
+    await assert.rejects(nextHarness.zoom(2, 1), /No line 2\+1/u);
+
+    await stopHarness(nextHarness);
+  } finally {
+    for (const h of activeHarnesses) {
+      await stopHarness(h);
+    }
+    if (prevAgentDir === undefined) delete process.env["PI_CODING_AGENT_DIR"];
+    else process.env["PI_CODING_AGENT_DIR"] = prevAgentDir;
+    if (prevOptchatHome === undefined) delete process.env["OPTCHAT_HOME"];
+    else process.env["OPTCHAT_HOME"] = prevOptchatHome;
+    if (prevYpiOptchat === undefined) delete process.env["YPI_OPTCHAT"];
+    else process.env["YPI_OPTCHAT"] = prevYpiOptchat;
+    if (prevYpiOptchatConfig === undefined) delete process.env["YPI_OPTCHAT_CONFIG"];
+    else process.env["YPI_OPTCHAT_CONFIG"] = prevYpiOptchatConfig;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

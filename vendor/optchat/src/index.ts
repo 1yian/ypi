@@ -4,16 +4,16 @@ import { join, resolve } from 'node:path';
 import { hostname } from 'node:os';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import { parseSkillBlock, type ExtensionAPI, type ExtensionContext, type ExtensionCommandContext, type SessionEntry } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
-import { Memory } from './memory.ts';
+import { Memory, type Entry, type Kind } from './memory.ts';
 import { atomicWrite, storeFor } from './store.ts';
 import { createCompressor, DEFAULT_COMPACTOR_FALLBACKS } from './compactor.ts';
 import { createProfile, holdProfile, instructions, isWindows, lastProfile, listProfiles, loadConfig, profilePath, rememberProfile, saveConfig, ProfileBusyError, type ProfileConfig } from './profiles.ts';
 import { allowSearch, CONTINUITY, IMPORT_GUIDANCE, MASTER, MASTER_NO_SUBAGENTS, modelsHint, SEARCH_DOC, TURN_REFRESHED, VIEW_DOC, VIEW_DOC_NO_SUBAGENTS } from './prompts.ts';
 import { anthropicRequest, cachePayload, record } from './cache.ts';
 import { saveImages } from './images.ts';
-import { asUser, boundedMessage, atWork, buildContext, chars, logMessage, previousExchange, refreshedRun, refreshBudget, refreshFraction, refreshPoint, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
+import { asUser, boundedMessage, atWork, branchMemoryEntries, buildContext, chars, logMessage, previousExchange, refreshedRun, refreshBudget, refreshFraction, refreshPoint, reportReceipt, REPORT_RECEIPT, REPORT_TYPE, RUN_BOUNDARY, textContent, typedText } from './transcript.ts';
 import { registerReportRenderer, type ReportDetails } from './report-message.ts';
 import { memoryTools, result, searchTool } from './tools.ts';
 import { Children, loadedBuiltins, modelsTool, refreshContextFiles, TASKS } from './agents.ts';
@@ -35,6 +35,37 @@ import { showModelPicker, showSettings } from './settings-page.ts';
 import { showMenu } from './menu.ts';
 
 const binding = 'optchat.profile';
+const ANCHOR = 'optchat.anchor';
+
+function findAnchor(branch: readonly SessionEntry[], profile: string, allowAnyProfile = false): number | undefined {
+  let fallback: number | undefined;
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry.type !== 'custom' || entry.customType !== ANCHOR || !record(entry.data)) continue;
+    const base = entry.data.base;
+    if (typeof base !== 'number' || !Number.isSafeInteger(base) || base < 0) continue;
+    if (entry.data.profile === profile) return base;
+    if (allowAnyProfile && fallback === undefined) fallback = base;
+  }
+  return fallback;
+}
+
+function inferBase(root: readonly Entry[], branchEntries: readonly { kind: Kind; text: string }[]): number {
+  if (branchEntries.length === 0) return root.length;
+  for (let start = root.length - branchEntries.length; start >= 0; start--) {
+    let matches = true;
+    for (let j = 0; j < branchEntries.length; j++) {
+      const existing = root[start + j];
+      const expected = branchEntries[j];
+      if (!existing || !expected || existing.kind !== expected.kind || existing.text !== expected.text) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return start;
+  }
+  return Math.max(0, root.length - branchEntries.length);
+}
 const CONNECT_MODES = ['auto', 'join', 'off'] as const;
 /** Print mode routes `process.stdout` to stderr so only the answer reaches stdout; the joined reply goes to fd 1 itself. */
 async function printReply(text: string) {
@@ -82,6 +113,7 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
   let prompt = '';
   let runStarted = false;
   let settledAt: number | undefined;
+  let sessionBase = 0;
   let fault: string | undefined;
   /** Reports not yet in memory. `count`: how many subagent reports the text joins. `batch`: held while the rest of that spawn runs, not sent yet.
    * `steered`: last sent into a running turn, where Esc or a dequeue can clear it from Pi's queue unseen. */
@@ -192,7 +224,7 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
       await old.memory.close(); await checkpoints;
     } finally {
       await old.memory.close(); await old.unlock(); active = undefined;
-      run = []; capped = 0; previous = []; logged = 0; keep = 0; view = undefined; runStarted = false; receipts.clear(); prompt = ''; idle = () => true;
+      run = []; capped = 0; previous = []; logged = 0; keep = 0; view = undefined; runStarted = false; settledAt = undefined; sessionBase = 0; receipts.clear(); prompt = ''; idle = () => true;
       untitle?.(); untitle = undefined; title.clear(); working = false;
     }
   };
@@ -267,7 +299,46 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
     }
   };
 
-  pi.on('session_start', async (_event, ctx) => {
+  const syncMemoryToBranch = async (ctx: ExtensionContext, allowAnyAnchorProfile = false) => {
+    const a = active;
+    if (!a) return;
+    run = [];
+    capped = 0;
+    logged = 0;
+    keep = 0;
+    view = undefined;
+    previous = [];
+    receipts.clear();
+    settledAt = undefined;
+    a.inbox.clear();
+    const branch = ctx.sessionManager.getBranch();
+    const branchEntries = branchMemoryEntries(branch, capabilities.transientCustomTypes);
+    const anchored = findAnchor(branch, a.name, allowAnyAnchorProfile);
+    const base = Math.min(anchored ?? sessionBase, a.memory.root.length);
+    sessionBase = base;
+    const target: Array<{ kind: Kind; text: string; date: string; receipt?: string }> = [
+      ...a.memory.root.slice(0, base).map(e => ({ kind: e.kind, text: e.text, date: e.date, ...(e.receipt ? { receipt: e.receipt } : {}) })),
+      ...branchEntries,
+    ];
+    let common = 0;
+    const limit = Math.min(a.memory.root.length, target.length);
+    while (common < limit && a.memory.root[common].kind === target[common].kind && a.memory.root[common].text === target[common].text) {
+      common += 1;
+    }
+    if (common < a.memory.root.length) {
+      await a.memory.rewind(common);
+    }
+    for (let i = common; i < target.length; i++) {
+      const entry = target[i];
+      a.memory.append(entry.kind, entry.text, entry.date, entry.receipt);
+    }
+    const dir = a.dir;
+    checkpoints = checkpoints.then(() => checkpoint(dir)).catch(error => ctx.ui.notify(`Local checkpoint failed: ${errorText(error)}`, 'error'));
+    await checkpoints;
+    status(ctx);
+  };
+
+  pi.on('session_start', async (event, ctx) => {
     stopping = false;
     const entries = ctx.sessionManager.getEntries();
     const saved = entries.findLast(e => e.type === 'custom' && e.customType === binding);
@@ -330,6 +401,18 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
         }
       }
       if (name !== boundName) pi.appendEntry(binding, { name });
+      if (active) {
+        const branch = ctx.sessionManager.getBranch();
+        const branchEntries = branchMemoryEntries(branch, capabilities.transientCustomTypes);
+        const anchored = findAnchor(branch, active.name, event.reason === 'fork');
+        sessionBase = Math.min(anchored ?? inferBase(active.memory.root, branchEntries), active.memory.root.length);
+        if (event.reason === 'fork') {
+          await syncMemoryToBranch(ctx, true);
+        }
+        if (findAnchor(branch, active.name, false) === undefined) {
+          pi.appendEntry(ANCHOR, { profile: active.name, base: sessionBase });
+        }
+      }
     } catch (error) {
       if (active) await stop().catch(() => {});
       fault = errorText(error);
@@ -364,6 +447,16 @@ export default function optchat(pi: ExtensionAPI, capabilities: OptChatCapabilit
   };
   pi.on('session_before_switch', (event, ctx) => blockSwitch(event.reason === 'new' ? '/new' : '/resume', ctx));
   pi.on('session_before_fork', (event, ctx) => blockSwitch(event.position === 'at' ? '/clone' : '/fork', ctx));
+  pi.on('session_before_tree', (_event, ctx) => blockSwitch('/tree', ctx));
+  pi.on('session_tree', async (_event, ctx) => {
+    if (!active || importing || pendingImport(active.dir)) return;
+    try {
+      await syncMemoryToBranch(ctx);
+    } catch (error) {
+      fault = errorText(error);
+      ctx.ui.notify(`OptChat could not rewind memory: ${fault}`, 'error');
+    }
+  });
   pi.on('input', async (event, ctx) => {
     if (joined) {
       try {

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadOptChatConfig, type ResolvedOptChatConfig } from "./config.ts";
@@ -47,6 +47,17 @@ function findBoundProfile(ctx: ExtensionContext): string | undefined {
     }
   }
   return undefined;
+}
+
+function cloneProfileMemory(sourceDir: string, targetDir: string): void {
+  if (!existsSync(sourceDir)) return;
+  mkdirSync(targetDir, { recursive: true, mode: 0o700 });
+  for (const name of ["main", "tree", "images", "view.json", "config.json", "AGENTS.md"]) {
+    const from = resolve(sourceDir, name);
+    const to = resolve(targetDir, name);
+    if (!existsSync(from)) continue;
+    cpSync(from, to, { recursive: true, force: true });
+  }
 }
 
 function ensureProfileDir(
@@ -113,18 +124,31 @@ export default async function ypiOptChat(pi: ExtensionAPI): Promise<void> {
 
   let ephemeralProfileDir: string | undefined;
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     const bound = findBoundProfile(ctx);
-    const profileName =
-      bound ?? config.profile ?? sessionProfileName(ctx.sessionManager.getSessionId());
+    const isPerSessionFork = event.reason === "fork" && config.profile === undefined;
+    const profileName = isPerSessionFork
+      ? sessionProfileName(ctx.sessionManager.getSessionId())
+      : (bound ?? config.profile ?? sessionProfileName(ctx.sessionManager.getSessionId()));
+    if (isPerSessionFork && bound !== undefined && bound !== profileName) {
+      const hasBranchMessages = ctx.sessionManager
+        .getBranch()
+        .some((entry) => entry.type === "message" || entry.type === "custom_message");
+      if (hasBranchMessages) {
+        cloneProfileMemory(
+          resolve(config.memoryHome, "profiles", bound),
+          resolve(config.memoryHome, "profiles", profileName),
+        );
+      }
+    }
     const profileDir = ensureProfileDir(profilesRaw, profilesUrl, config.memoryHome, profileName);
     const isEphemeral =
-      bound === undefined &&
+      (bound === undefined || isPerSessionFork) &&
       config.profile === undefined &&
       ctx.sessionManager.getSessionFile() === undefined;
     ephemeralProfileDir = isEphemeral ? profileDir : undefined;
 
-    if (bound === undefined) {
+    if (bound === undefined || profileName !== bound) {
       pi.appendEntry("optchat.profile", { name: profileName });
     }
     const compactor = resolveCompactor(ctx, config);

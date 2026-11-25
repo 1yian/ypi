@@ -114,7 +114,8 @@ export class Memory {
   readonly root: Entry[] = [];
   readonly tree = new Map<number, Summary>();
   private readonly events = new EventEmitter();
-  private readonly controller = new AbortController();
+  private controller = new AbortController();
+  private generation = 0;
   private readonly busy = new Map<number, Promise<void>>();
   private readonly retryAt = new Map<number, number>();
   private readonly reported = new Set<number>();
@@ -126,8 +127,8 @@ export class Memory {
   private peak = 0;
   private scheduled = false;
   private stopped = false;
-  private readonly chat: Sawtooth;
-  private readonly compaction: Sawtooth;
+  private chat: Sawtooth;
+  private compaction: Sawtooth;
   /** The last store write still running, if any. Once an append fails, later writes are skipped and appends throw, as after a failed file write. */
   private writing?: Promise<void>;
   private failed?: string;
@@ -225,11 +226,63 @@ export class Memory {
   }
   /** Saved when either view merges or changes batch state: a view that only grew is the saved one plus later messages, as `load`
    * replays it. The log stays authoritative, so a failed save only warns. */
+  private serializeView() {
+    const saved = ({ parts, merging }: Sawtooth) => ({ parts: parts.map(p => [p.l, p.i]), merging });
+    return JSON.stringify({ ...saved(this.chat), compaction: saved(this.compaction) });
+  }
   private save() {
     const failed = (error: unknown) => { this.warn(`Could not save the memory view: ${error instanceof Error ? error.message : String(error)}`); };
-    const saved = ({ parts, merging }: Sawtooth) => ({ parts: parts.map(p => [p.l, p.i]), merging });
-    try { void this.enqueue(() => this.store.saveView(JSON.stringify({ ...saved(this.chat), compaction: saved(this.compaction) })), failed); }
+    try { void this.enqueue(() => this.store.saveView(this.serializeView()), failed); }
     catch (error) { failed(error); }
+  }
+  async rewind(length: number) {
+    if (this.stopped) throw new Error('Memory is closed.');
+    if (this.failed) throw new Error(`Memory could not be saved: ${this.failed}`);
+    if (!Number.isSafeInteger(length) || length < 0 || length > this.root.length) {
+      throw new Error(`Invalid rewind length ${length} for memory of ${this.root.length} entries.`);
+    }
+    if (length === this.root.length) return;
+    this.generation += 1;
+    this.controller.abort();
+    this.controller = new AbortController();
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    await Promise.allSettled(this.busy.values());
+    await this.writing;
+    if (this.stopped) return;
+    this.root.length = length;
+    for (const [id, node] of this.tree) {
+      if (end(node) > length) this.tree.delete(id);
+    }
+    this.unbuilt.clear();
+    this.merges.clear();
+    this.retryAt.clear();
+    this.reported.clear();
+    this.lastError = undefined;
+    this.peak = 0;
+    this.chat = new Sawtooth(this.budget, this.budget / 2, part => this.node(part));
+    this.compaction = new Sawtooth(this.budget / 4, this.budget / 8, part => this.node(part));
+    for (const node of this.tree.values()) this.queueParent(node);
+    for (let i = 0; i < this.root.length; i++) {
+      this.push(i);
+      this.fit(i + 1);
+    }
+    this.fit();
+    const viewJson = this.serializeView();
+    if (this.store.rewrite) {
+      const written = this.enqueue(
+        () => this.store.rewrite?.(this.root, [...this.tree.values()], viewJson),
+        error => {
+          this.failed ??= error instanceof Error ? error.message : String(error);
+          this.warn(`Memory could not be saved: ${this.failed}`);
+        },
+      );
+      if (written) await written;
+    } else {
+      this.save();
+    }
+    this.schedule();
+    this.events.emit('change');
   }
   private push(i: number) {
     const part = { l: 0, i };
@@ -270,17 +323,22 @@ export class Memory {
     if (this.stopped) return;
     // One clock reading: skipping a part and arming its retry timer must agree on what is due.
     const now = Date.now();
+    const gen = this.generation;
     const run = (part: Part) => {
       const id = key(part);
       if (this.busy.has(id) || (this.retryAt.get(id) ?? 0) > now) return;
-      const promise = this.build(part).catch(error => {
-        if (this.stopped) return;
+      const promise = this.build(part, gen).catch(error => {
+        if (this.stopped || gen !== this.generation) return;
         this.lastError = error instanceof Error ? error.message : String(error);
         if (!this.reported.has(id)) { this.reported.add(id); this.warn(`Compactor ${start(part)}+${2 ** part.l}: ${this.lastError}`); }
         this.retryAt.set(id, Date.now() + this.retryMs);
         if (!this.retryTimer) this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.schedule(); }, this.retryMs);
-      // Schedule before telling waiters, so a turn never mistakes the gap before the next pump for a stall.
-      }).finally(() => { this.busy.delete(id); this.schedule(); this.events.emit('change'); });
+      }).finally(() => {
+        this.busy.delete(id);
+        if (gen !== this.generation) return;
+        this.schedule();
+        this.events.emit('change');
+      });
       this.busy.set(id, promise);
     };
     // A message's node starts once fewer than `jobs` lines before it are unbuilt; a merge, once both halves are built. They start
@@ -300,7 +358,8 @@ export class Memory {
   }
   /** Nothing is being built, nothing more can start, and something failed: only a retry can make progress. */
   private get stalled() { return this.busy.size === 0 && !this.scheduled && this.retryAt.size > 0; }
-  private async build(part: Part) {
+  private async build(part: Part, gen: number) {
+    if (this.stopped || gen !== this.generation) return;
     const source = part.l === 0 ? `${label(this.root[part.i])}: ${this.root[part.i].text}`
       : [0, 1].map(offset => this.text({ l: part.l - 1, i: 2 * part.i + offset })).join('\n');
     const mergeSource = part.l > 0 ? [0, 1].map(offset => flat(this.text({ l: part.l - 1, i: 2 * part.i + offset }))).join('\n') : source;
@@ -312,15 +371,15 @@ export class Memory {
         ...(call ? { call: { i: call.i, text: cap(`tool: ${call.text}`, 4000) } } : {}) }, this.controller.signal)).trim();
       if (!text) throw new Refused('Compactor returned an empty summary.');
     } catch (error) {
-      if (!(error instanceof Refused) || this.stopped) throw error;
+      if (!(error instanceof Refused) || this.stopped || gen !== this.generation) throw error;
       text = cut(`${CLIPPED} ${flat(mergeSource)}`);
       this.warn(`Compactor ${start(part)}+${2 ** part.l}: ${error.message} (kept its start instead)`);
     }
-    if (this.stopped) return;
+    if (this.stopped || gen !== this.generation) return;
     const node = { ...part, text, size: lineBytes(text) };
-    // A failed node write fails the build, which is retried.
     const written = this.enqueue(() => this.store.appendNode(node), error => { throw error; });
     if (written) await written;
+    if (this.stopped || gen !== this.generation) return;
     this.tree.set(key(part), node); this.retryAt.delete(key(part)); this.merges.delete(key(part)); this.queueParent(part);
     if (!part.l) { this.unbuilt.delete(part.i); this.chat.built(part.i); this.compaction.built(part.i); }
     if (!this.retryAt.size) this.lastError = undefined;
